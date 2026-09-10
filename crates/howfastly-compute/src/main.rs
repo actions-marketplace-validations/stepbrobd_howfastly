@@ -34,7 +34,13 @@ fn main() {
     };
 
     // each arm answers the client and says what the request counts as
+    let alias = handlers::on_alias(&req);
     let event = match (&method, path.as_str()) {
+        // the alias serves the api alone, its pages and files live on the canonical host
+        (&Method::GET, p) if alias && !handlers::api(p) => {
+            send(handlers::canonical(&req));
+            None
+        }
         (&Method::GET, "/ping") => {
             send(handlers::ack(start));
             None

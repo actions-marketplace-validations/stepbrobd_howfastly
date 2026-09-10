@@ -7,6 +7,10 @@ use fastly::{Request, Response};
 
 static CHUNK: [u8; 64 * 1024] = [0x55; 64 * 1024];
 
+// the site lives on one hostname, the alias hands its pages over and keeps answering the api
+pub const HOST: &str = "speed.edgecompute.app";
+const ALIAS: &str = "howfastly.edgecompute.app";
+
 const SECRET_STORE: &str = "secretstore";
 const API_KEY: &str = "fastly-api-key";
 const API_BACKEND: &str = "fastly";
@@ -205,6 +209,29 @@ pub fn not_found() -> Response {
 // a dead link or a typo sends the visitor to the live app
 pub fn home() -> Response {
     Response::from_status(StatusCode::SEE_OTHER).with_header(header::LOCATION, "/")
+}
+
+pub fn on_alias(req: &Request) -> bool {
+    req.get_url().host_str() == Some(ALIAS)
+}
+
+// the measurement and sharing endpoints answer on any hostname, a cli may point at the alias
+pub fn api(path: &str) -> bool {
+    matches!(
+        path,
+        "/ping" | "/down" | "/up" | "/meta" | "/start" | "/finish" | "/share"
+    ) || (path.starts_with("/share/") && path.ends_with(".json"))
+}
+
+// the same path and query on the canonical host, permanent so search engines move over
+pub fn canonical(req: &Request) -> Response {
+    let url = req.get_url();
+    let mut target = format!("https://{HOST}{}", url.path());
+    if let Some(query) = url.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    Response::from_status(StatusCode::PERMANENT_REDIRECT).with_header(header::LOCATION, target)
 }
 
 pub fn method_not_allowed(allow: &'static str) -> Response {

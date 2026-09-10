@@ -4,11 +4,10 @@ use howfastly::stats::{latency_bucket, speed_bucket};
 use howfastly::types::{Direction, Outcome, Run};
 use serde_json::{Map, json};
 
-use crate::handlers;
+use crate::handlers::{self, HOST};
 
 const BACKEND: &str = "plausible";
 const ENDPOINT: &str = "https://stats.ysun.co/api/event";
-const DOMAIN: &str = "speed.edgecompute.app";
 
 // what a request counts as, a run is bracketed by start and the way it ended
 // the run is boxed so the enum stays as small as its unit variants
@@ -88,7 +87,7 @@ pub fn send(req: &Request, event: &Event) {
         props.insert(key.into(), value.into());
     }
     let body = json!({
-        "domain": DOMAIN,
+        "domain": HOST,
         "name": event.name(),
         "url": event.url(req),
         "referrer": referrer(req),

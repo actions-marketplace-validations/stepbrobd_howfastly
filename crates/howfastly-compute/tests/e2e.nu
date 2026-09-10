@@ -12,6 +12,11 @@ def sent-home [response: record] {
   assert equal ($response.headers.response | where name == location | first | get value) "/"
 }
 
+# the alias hostname hands its pages over to the canonical one, the api stays
+def via-alias [url: string, path: string]: nothing -> string {
+  curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: howfastly.edgecompute.app' $"($url)($path)"
+}
+
 def share-payload [] {
   {
     format: 1
@@ -149,6 +154,11 @@ def checks [url: string, log: string] {
     assert equal ($icon.headers.response | where name == cache-control | first | get value) "public, max-age=86400"
     assert (($icon.body | into binary | bytes at 1..3) == ("PNG" | into binary))
   }
+  assert equal (via-alias $url "/") "308 https://speed.edgecompute.app/"
+  assert equal (via-alias $url "/share/abc?x=1") "308 https://speed.edgecompute.app/share/abc?x=1"
+  assert equal (via-alias $url "/robots.txt") "308 https://speed.edgecompute.app/robots.txt"
+  assert equal (via-alias $url "/ping") "204 "
+  assert equal (via-alias $url "/share/abc.json") "404 "
 
   # a head takes the get path and answers with its headers alone
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/") "200"
