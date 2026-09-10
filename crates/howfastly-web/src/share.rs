@@ -138,7 +138,7 @@ pub fn route() -> Option<String> {
 const EMBED: &str = "howfastly-report";
 
 // the embedded report of a shared page, or its json twin when the shell came without one
-// none for anything that cannot be shown, the server explained every miss on its own page
+// none for anything that cannot be shown, the viewer then sends the visitor home
 pub async fn load(id: String) -> Option<Report> {
     if !valid_id(&id) {
         return None;
