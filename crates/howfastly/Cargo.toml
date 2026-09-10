@@ -3,6 +3,7 @@ name        = "howfastly"
 description = "Measure your connection speed to the Fastly network"
 
 edition.workspace      = true
+homepage.workspace     = true
 license.workspace      = true
 readme.workspace       = true
 repository.workspace   = true
