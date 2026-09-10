@@ -116,18 +116,7 @@ pub fn App() -> impl IntoView {
             })}
 
             // the build that served the page, checkable against the cache
-            {move || state.meta.get().and_then(|m| m.store).map(|path| {
-                let href = narinfo(&path);
-                view! {
-                    <pre class="overflow-x-auto rounded bg-nord-1 p-4 text-center text-sm text-nord-13"><code>
-                        "nix path-info "
-                        <a href=href target="_blank" rel="noopener">{path}</a>
-                        " --store "
-                        <a href=CACHE target="_blank" rel="noopener">{CACHE}</a>
-                        " --json-format 2 --json"
-                    </code></pre>
-                }
-            })}
+            {move || state.meta.get().and_then(|m| m.store).map(|path| view! { <StorePath path=path/> })}
 
             <Footer/>
 
@@ -277,15 +266,6 @@ fn Viewer(report: Report) -> impl IntoView {
                 <dd class="text-nord-6">{published}</dd>
                 <dt class="text-nord-4">Expires</dt>
                 <dd class="text-nord-6">{expires}</dd>
-                {store.map(|path| {
-                    let href = narinfo(&path);
-                    view! {
-                        <dt class="text-nord-4">Build</dt>
-                        <dd class="text-nord-6 [overflow-wrap:anywhere]">
-                            <a href=href target="_blank" rel="noopener">{path}</a>
-                        </dd>
-                    }
-                })}
             </dl>
             <p class="mt-2 text-nord-4"><small>
                 "The network and datacenter are those of the connection that published this result, "
@@ -299,6 +279,9 @@ fn Viewer(report: Report) -> impl IntoView {
         </div>
 
         <Latency unloaded=latency down=down up=up/>
+
+        // the build that published the result, checkable against the cache
+        {store.map(|path| view! { <StorePath path=path/> })}
     }
 }
 
@@ -370,14 +353,25 @@ fn RouteBar(meta: Signal<Option<MetaResponse>>, tip: &'static str) -> impl IntoV
     }
 }
 
-// the narinfo sits under the hash that opens the store name
-fn narinfo(path: &str) -> String {
+// the path-info line of a build, the path linking to its narinfo and the cache to its root
+#[component]
+fn StorePath(path: String) -> impl IntoView {
+    // the narinfo sits under the hash that opens the store name
     let hash = path
         .rsplit('/')
         .next()
         .and_then(|name| name.split('-').next())
         .unwrap_or_default();
-    format!("{CACHE}/{hash}.narinfo")
+    let href = format!("{CACHE}/{hash}.narinfo");
+    view! {
+        <pre class="overflow-x-auto rounded bg-nord-1 p-4 text-center text-sm text-nord-13"><code>
+            "nix path-info "
+            <a href=href target="_blank" rel="noopener">{path}</a>
+            " --store "
+            <a href=CACHE target="_blank" rel="noopener">{CACHE}</a>
+            " --json-format 2 --json"
+        </code></pre>
+    }
 }
 
 #[component]
