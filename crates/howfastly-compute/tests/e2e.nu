@@ -84,7 +84,7 @@ def sharing [url: string] {
   assert equal ($page.headers.response | where name == x-robots-tag | first | get value) noindex
   assert equal ($result.headers.response | where name == x-robots-tag | first | get value) noindex
   let html = $page.body | into string
-  assert ($html | str contains '<title>HowFastly: 100.0 Mbps down, 10.0 ms latency</title>')
+  assert ($html | str contains '<title>HowFastly: 100.0 Mbps Down, 10.0 ms Latency</title>')
   assert ($html | str contains ('<meta property="og:url" content="' + $link.url + '" />'))
   assert ($html | str contains '<script id="howfastly-report" type="application/json">{"format":1,')
   assert equal ($html | split row '<title>' | length) 2

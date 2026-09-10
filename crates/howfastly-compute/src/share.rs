@@ -447,20 +447,21 @@ fn speed(mbps: f64) -> String {
     }
 }
 
+// a web page title, so title case with the units as they are
 fn headline(report: &Report) -> String {
     let p = &report.payload;
     let mut parts = Vec::new();
     if let Some(mbps) = p.download.as_ref().and_then(|d| d.summary.p90) {
-        parts.push(format!("{} down", speed(mbps)));
+        parts.push(format!("{} Down", speed(mbps)));
     }
     if let Some(mbps) = p.upload.as_ref().and_then(|d| d.summary.p90) {
-        parts.push(format!("{} up", speed(mbps)));
+        parts.push(format!("{} Up", speed(mbps)));
     }
     if let Some(latency) = &p.latency {
-        parts.push(format!("{:.1} ms latency", latency.median));
+        parts.push(format!("{:.1} ms Latency", latency.median));
     }
     if parts.is_empty() {
-        "HowFastly shared result".into()
+        "HowFastly Shared Result".into()
     } else {
         format!("HowFastly: {}", parts.join(", "))
     }
