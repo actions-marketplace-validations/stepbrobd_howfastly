@@ -4,7 +4,7 @@ use include_dir::{Dir, include_dir};
 
 static DIST: Dir<'_> = include_dir!("$WEB_DIST");
 
-// the icon keeps a fixed name, a day lets a replacement through
+// the icon, robots and the sitemap keep fixed names, a day lets a replacement through
 pub const DAY: &str = "public, max-age=86400";
 
 pub fn serve(path: &str) -> Option<Response> {

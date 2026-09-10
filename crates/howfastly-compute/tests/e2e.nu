@@ -147,6 +147,18 @@ def checks [url: string, log: string] {
   assert ($shell | str contains '<link rel="canonical" href="https://speed.edgecompute.app/" />')
   assert ($shell | str contains '<title>HowFastly: Internet Speed Test Powered by Fastly Compute</title>')
   assert ($shell | str contains 'type="application/ld+json"')
+  let robots = fetch $"($url)/robots.txt"
+  assert equal $robots.status 200
+  assert (($robots.headers.response | where name == content-type | first | get value) =~ "text/plain")
+  assert (($robots.body | into string) | str contains "Disallow: /down\n")
+  assert (($robots.body | into string) | str contains "Sitemap: https://speed.edgecompute.app/sitemap.xml\n")
+  assert (not (($robots.body | into string) | str contains "/share"))
+  # raw keeps nu from parsing the xml into a record
+  let sitemap = http get --full --allow-errors --raw $"($url)/sitemap.xml"
+  assert equal $sitemap.status 200
+  assert (($sitemap.headers.response | where name == content-type | first | get value) =~ "application/xml")
+  assert (($sitemap.body | into string) | str contains "<loc>https://speed.edgecompute.app/</loc>")
+  assert equal (http post --full --allow-errors $"($url)/robots.txt" "" | get status) 405
   for file in [favicon.ico favicon.png] {
     let icon = fetch $"($url)/($file)"
     assert equal $icon.status 200
@@ -165,6 +177,7 @@ def checks [url: string, log: string] {
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/ping") "204"
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/down?bytes=1000") "200"
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/nope") "303"
+  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/robots.txt") "200"
   assert ((curl -sI $"($url)/" | str lowercase) =~ "content-type: text/html")
   assert equal (http get $"($url)/down?bytes=1000000" | into binary | bytes length) 1000000
 

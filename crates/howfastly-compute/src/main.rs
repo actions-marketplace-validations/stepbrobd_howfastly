@@ -61,6 +61,14 @@ fn main() {
             send(handlers::meta(&req, start));
             None
         }
+        (&Method::GET, "/robots.txt") => {
+            send(handlers::robots());
+            None
+        }
+        (&Method::GET, "/sitemap.xml") => {
+            send(handlers::sitemap());
+            None
+        }
         (&Method::POST, "/finish") => {
             let (resp, run) = handlers::finish(&mut req, start);
             send(resp);
@@ -99,7 +107,7 @@ fn main() {
             send(handlers::method_not_allowed("GET, HEAD"));
             None
         }
-        (_, "/ping" | "/down" | "/meta") => {
+        (_, "/ping" | "/down" | "/meta" | "/robots.txt" | "/sitemap.xml") => {
             send(handlers::method_not_allowed("GET, HEAD"));
             None
         }

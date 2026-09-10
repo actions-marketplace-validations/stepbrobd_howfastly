@@ -5,6 +5,8 @@ use fastly::cache::simple::{self, CacheEntry};
 use fastly::http::{StatusCode, Url, Version, header};
 use fastly::{Request, Response};
 
+use crate::assets;
+
 static CHUNK: [u8; 64 * 1024] = [0x55; 64 * 1024];
 
 // the site lives on one hostname, the alias hands its pages over and keeps answering the api
@@ -232,6 +234,20 @@ pub fn canonical(req: &Request) -> Response {
         target.push_str(query);
     }
     Response::from_status(StatusCode::PERMANENT_REDIRECT).with_header(header::LOCATION, target)
+}
+
+// crawlers stay off the transfer and reporting endpoints, one hit on down costs 100 MB of egress
+pub fn robots() -> Response {
+    assets::headed(StatusCode::OK, "text/plain; charset=utf-8", assets::DAY).with_body(format!(
+        "User-agent: *\nDisallow: /ping\nDisallow: /down\nDisallow: /up\nDisallow: /start\nDisallow: /finish\nDisallow: /meta\n\nSitemap: https://{HOST}/sitemap.xml\n"
+    ))
+}
+
+// the one page of the site
+pub fn sitemap() -> Response {
+    assets::headed(StatusCode::OK, "application/xml; charset=utf-8", assets::DAY).with_body(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n  <url>\n    <loc>https://{HOST}/</loc>\n  </url>\n</urlset>\n"
+    ))
 }
 
 pub fn method_not_allowed(allow: &'static str) -> Response {
