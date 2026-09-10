@@ -405,11 +405,16 @@ fn document(html: String) -> Response {
         .with_body(html)
 }
 
+// the shell marks the page block, title through open graph, that a result rewrites whole
+const PAGE_OPEN: &str = "<!-- page -->";
+const PAGE_CLOSE: &str = "<!-- /page -->";
+
 // the embedded json is what the app renders, the tags are what link previews read
-// the tags close the head so the shell's charset meta stays first
+// the site wide tags outside the block, the icon among them, stay as they are
 fn shell(report: &Report, url: &str) -> Option<String> {
     let html = assets::shell()?;
-    let at = html.find("</head>")?;
+    let from = html.find(PAGE_OPEN)?;
+    let to = from + html[from..].find(PAGE_CLOSE)? + PAGE_CLOSE.len();
     let title = share::escape_html(&headline(report));
     let description = share::escape_html(&summary(report));
     let url = share::escape_html(url);
@@ -417,43 +422,17 @@ fn shell(report: &Report, url: &str) -> Option<String> {
     let tags = [
         format!("<title>{title}</title>"),
         format!("<meta name=\"description\" content=\"{description}\" />"),
-        format!("<meta property=\"og:title\" content=\"{title}\" />"),
-        format!("<meta property=\"og:description\" content=\"{description}\" />"),
         "<meta property=\"og:type\" content=\"website\" />".to_string(),
         format!("<meta property=\"og:url\" content=\"{url}\" />"),
-        "<meta name=\"twitter:card\" content=\"summary\" />".to_string(),
+        format!("<meta property=\"og:title\" content=\"{title}\" />"),
+        format!("<meta property=\"og:description\" content=\"{description}\" />"),
         format!("<script id=\"howfastly-report\" type=\"application/json\">{json}</script>"),
     ];
-    let (before, after) = html.split_at(at);
-    let before = strip(
-        &strip(before, "<title>", "<title>", "</title>"),
-        "name=\"description\"",
-        "<meta",
-        ">",
-    );
     let mut out = String::with_capacity(html.len() + json.len() + 1024);
-    out.push_str(before.trim_end());
-    for tag in &tags {
-        out.push_str("\n    ");
-        out.push_str(tag);
-    }
-    out.push_str("\n  ");
-    out.push_str(after);
+    out.push_str(&html[..from]);
+    out.push_str(&tags.join("\n    "));
+    out.push_str(&html[to..]);
     Some(out)
-}
-
-// the text without the element around the first marker, open precedes it and close follows
-fn strip(html: &str, marker: &str, open: &str, close: &str) -> String {
-    let Some(at) = html.find(marker) else {
-        return html.to_string();
-    };
-    let Some(from) = html[..at + marker.len()].rfind(open) else {
-        return html.to_string();
-    };
-    let Some(len) = html[at..].find(close) else {
-        return html.to_string();
-    };
-    format!("{}{}", &html[..from], &html[at + len + close.len()..])
 }
 
 fn speed(mbps: f64) -> String {

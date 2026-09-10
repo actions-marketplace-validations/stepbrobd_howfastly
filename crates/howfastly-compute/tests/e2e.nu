@@ -82,6 +82,11 @@ def sharing [url: string] {
   assert ($html | str contains ('<meta property="og:url" content="' + $link.url + '" />'))
   assert ($html | str contains '<script id="howfastly-report" type="application/json">{"format":1,')
   assert equal ($html | split row '<title>' | length) 2
+  # the page block is rewritten whole, the site wide tags and the icon stay
+  assert equal ($html | split row 'property="og:title"' | length) 2
+  assert (not ($html | str contains 'rel="canonical"'))
+  assert ($html | str contains 'href="/favicon.png"')
+  assert ($html | str contains 'name="google-site-verification"')
   # a build string cannot close the script element, it reaches the page as json escapes
   let hostile = $payload | upsert build '</script><svg/onload=alert(1)>'
   let planted = http post --full --allow-errors --content-type application/json $"($url)/share" $hostile
@@ -132,6 +137,10 @@ def checks [url: string, log: string] {
   assert equal (fetch $"($url)/assets/nope.js" | get status) 404
   assert equal (http post --full --allow-errors $"($url)/nope" "" | get status) 404
 
+  # what search engines read
+  let shell = http get $"($url)/" | into string
+  assert ($shell | str contains '<link rel="canonical" href="https://speed.edgecompute.app/" />')
+  assert ($shell | str contains '<title>HowFastly: Internet Speed Test Powered by Fastly Compute</title>')
   for file in [favicon.ico favicon.png] {
     let icon = fetch $"($url)/($file)"
     assert equal $icon.status 200
