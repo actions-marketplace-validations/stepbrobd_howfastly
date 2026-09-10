@@ -62,14 +62,7 @@ pub fn App() -> impl IntoView {
 
     view! {
         <main class="mx-auto flex min-h-screen w-full max-w-[65ch] flex-col gap-8 p-4 lg:max-w-6xl">
-            <section class="rounded bg-nord-1 p-4">
-                <div class="text-center font-mono [overflow-wrap:anywhere]" title=tips::ROUTE>
-                    {move || match state.meta.get() {
-                        Some(m) => hops(&m),
-                        None => view! { "-" }.into_any(),
-                    }}
-                </div>
-            </section>
+            <RouteBar meta=state.meta.into() tip=tips::ROUTE/>
 
             <section class="rounded bg-nord-1 p-4">
                 <Map meta=state.meta.into() active=Signal::derive(move || !gate.get())>
@@ -112,36 +105,11 @@ pub fn App() -> impl IntoView {
             })}
 
             <div class="grid gap-8 lg:grid-cols-2">
-                <section class="flex flex-col gap-4">
-                    <Headline lane=state.down/>
-                    <SizeTable lane=state.down plans=Direction::Download.plan().to_vec()/>
-                </section>
-                <section class="flex flex-col gap-4">
-                    <Headline lane=state.up/>
-                    <SizeTable lane=state.up plans=Direction::Upload.plan().to_vec()/>
-                </section>
+                <Throughput lane=state.down plans=Direction::Download.plan().to_vec()/>
+                <Throughput lane=state.up plans=Direction::Upload.plan().to_vec()/>
             </div>
 
-            <section class="rounded bg-nord-1 p-4">
-                <h2 class="font-semibold">Latency</h2>
-                <div class="mt-2 grid gap-4 sm:grid-cols-3">
-                    <LatencyCard label="Unloaded" tip=tips::UNLOADED summary=state.latency.into()/>
-                    <LatencyCard
-                        label="Download loaded"
-                        tip=tips::LOADED
-                        summary=Signal::derive(move || {
-                            state.down.summary.get().and_then(|d| d.loaded)
-                        })
-                    />
-                    <LatencyCard
-                        label="Upload loaded"
-                        tip=tips::LOADED
-                        summary=Signal::derive(move || {
-                            state.up.summary.get().and_then(|d| d.loaded)
-                        })
-                    />
-                </div>
-            </section>
+            <Latency unloaded=state.latency.into() down=state.down up=state.up/>
 
             {move || state.error.get().map(|e| view! {
                 <div class="rounded border border-nord-11 bg-nord-1 p-4 text-nord-11">{e}</div>
@@ -238,7 +206,6 @@ fn Viewer(report: Report) -> impl IntoView {
     let publication = report.publication;
     let (published_at, expires_at) = (report.published_at, report.expires_at);
     let meta = publication.to_meta();
-    let bar = hops(&meta);
     let down = stored(Direction::Download, payload.download.as_ref());
     let up = stored(Direction::Upload, payload.upload.as_ref());
     let down_empty = absent(payload.download.as_ref());
@@ -288,11 +255,7 @@ fn Viewer(report: Report) -> impl IntoView {
     let meta: Signal<Option<MetaResponse>> = RwSignal::new(Some(meta)).into();
 
     view! {
-        <section class="rounded bg-nord-1 p-4">
-            <div class="text-center font-mono [overflow-wrap:anywhere]" title=tips::PUBLICATION>
-                {bar}
-            </div>
-        </section>
+        <RouteBar meta=meta tip=tips::PUBLICATION/>
 
         <section class="rounded bg-nord-1 p-4">
             <Map meta=meta active=RwSignal::new(true).into()>
@@ -331,32 +294,11 @@ fn Viewer(report: Report) -> impl IntoView {
         </section>
 
         <div class="grid gap-8 lg:grid-cols-2">
-            <section class="flex flex-col gap-4">
-                <Headline lane=down empty=down_empty/>
-                <SizeTable lane=down plans=down_plans/>
-            </section>
-            <section class="flex flex-col gap-4">
-                <Headline lane=up empty=up_empty/>
-                <SizeTable lane=up plans=up_plans/>
-            </section>
+            <Throughput lane=down plans=down_plans empty=down_empty/>
+            <Throughput lane=up plans=up_plans empty=up_empty/>
         </div>
 
-        <section class="rounded bg-nord-1 p-4">
-            <h2 class="font-semibold">Latency</h2>
-            <div class="mt-2 grid gap-4 sm:grid-cols-3">
-                <LatencyCard label="Unloaded" tip=tips::UNLOADED summary=latency/>
-                <LatencyCard
-                    label="Download loaded"
-                    tip=tips::LOADED
-                    summary=Signal::derive(move || down.summary.get().and_then(|d| d.loaded))
-                />
-                <LatencyCard
-                    label="Upload loaded"
-                    tip=tips::LOADED
-                    summary=Signal::derive(move || up.summary.get().and_then(|d| d.loaded))
-                />
-            </div>
-        </section>
+        <Latency unloaded=latency down=down up=up/>
     }
 }
 
@@ -411,6 +353,21 @@ fn hops(m: &MetaResponse) -> AnyView {
         {via}
     }
     .into_any()
+}
+
+// the card with the network and the datacenter, a dash until the meta is known
+#[component]
+fn RouteBar(meta: Signal<Option<MetaResponse>>, tip: &'static str) -> impl IntoView {
+    view! {
+        <section class="rounded bg-nord-1 p-4">
+            <div class="text-center font-mono [overflow-wrap:anywhere]" title=tip>
+                {move || match meta.get() {
+                    Some(m) => hops(&m),
+                    None => view! { "-" }.into_any(),
+                }}
+            </div>
+        </section>
+    }
 }
 
 // the narinfo sits under the hash that opens the store name
@@ -546,6 +503,21 @@ fn SpeedChart(lane: Lane, empty: &'static str) -> impl IntoView {
 }
 
 // empty is what the chart says while it has no line, the live run waits, a share explains
+// one direction, the headline over the table of sizes
+#[component]
+fn Throughput(
+    lane: Lane,
+    plans: Vec<SizePlan>,
+    #[prop(default = WAITING)] empty: &'static str,
+) -> impl IntoView {
+    view! {
+        <section class="flex flex-col gap-4">
+            <Headline lane=lane empty=empty/>
+            <SizeTable lane=lane plans=plans/>
+        </section>
+    }
+}
+
 #[component]
 fn Headline(lane: Lane, #[prop(default = WAITING)] empty: &'static str) -> impl IntoView {
     let label = lane.dir.name();
@@ -592,6 +564,29 @@ fn Headline(lane: Lane, #[prop(default = WAITING)] empty: &'static str) -> impl 
             </div>
             <SpeedChart lane=lane empty=empty/>
         </div>
+    }
+}
+
+// the unloaded round trips and the loaded ones of each direction
+#[component]
+fn Latency(unloaded: Signal<Option<LatencySummary>>, down: Lane, up: Lane) -> impl IntoView {
+    view! {
+        <section class="rounded bg-nord-1 p-4">
+            <h2 class="font-semibold">Latency</h2>
+            <div class="mt-2 grid gap-4 sm:grid-cols-3">
+                <LatencyCard label="Unloaded" tip=tips::UNLOADED summary=unloaded/>
+                <LatencyCard
+                    label="Download loaded"
+                    tip=tips::LOADED
+                    summary=Signal::derive(move || down.summary.get().and_then(|d| d.loaded))
+                />
+                <LatencyCard
+                    label="Upload loaded"
+                    tip=tips::LOADED
+                    summary=Signal::derive(move || up.summary.get().and_then(|d| d.loaded))
+                />
+            </div>
+        </section>
     }
 }
 
