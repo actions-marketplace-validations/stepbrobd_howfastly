@@ -4,9 +4,13 @@ use include_dir::{Dir, include_dir};
 
 static DIST: Dir<'_> = include_dir!("$WEB_DIST");
 
+// the icon keeps a fixed name, a day lets a replacement through
+pub const DAY: &str = "public, max-age=86400";
+
 pub fn serve(path: &str) -> Option<Response> {
     let (file, cache) = match path {
         "/" => (DIST.get_file("index.html")?, "no-cache"),
+        "/favicon.ico" | "/favicon.png" => (DIST.get_file("favicon.png")?, DAY),
         _ => {
             let name = path.strip_prefix("/assets/")?;
             // the shell lives at the root only, a long lifetime would pin an old build

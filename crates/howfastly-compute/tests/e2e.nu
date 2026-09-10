@@ -132,6 +132,14 @@ def checks [url: string, log: string] {
   assert equal (fetch $"($url)/assets/nope.js" | get status) 404
   assert equal (http post --full --allow-errors $"($url)/nope" "" | get status) 404
 
+  for file in [favicon.ico favicon.png] {
+    let icon = fetch $"($url)/($file)"
+    assert equal $icon.status 200
+    assert equal ($icon.headers.response | where name == content-type | first | get value) image/png
+    assert equal ($icon.headers.response | where name == cache-control | first | get value) "public, max-age=86400"
+    assert (($icon.body | into binary | bytes at 1..3) == ("PNG" | into binary))
+  }
+
   # a head takes the get path and answers with its headers alone
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/") "200"
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/ping") "204"

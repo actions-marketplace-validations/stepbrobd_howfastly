@@ -28,6 +28,7 @@ pub fn content_type(path: &str) -> &'static str {
         Some("html") => "text/html; charset=utf-8",
         Some("ico") => "image/x-icon",
         Some("js") => "text/javascript",
+        Some("png") => "image/png",
         Some("svg") => "image/svg+xml",
         Some("wasm") => "application/wasm",
         _ => "application/octet-stream",
