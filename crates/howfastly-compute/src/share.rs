@@ -389,12 +389,16 @@ pub fn json(id: &str) -> Response {
     }
 }
 
-// the shell around a live record, anything else sends the visitor home
+// the shell around a live record, a miss answers the shell under its status and the app explains
 pub fn page(req: &Request, id: &str) -> Response {
     let url = handlers::url_at(req.get_url(), &format!("/share/{id}"));
-    match load(id, now()).ok().and_then(|report| shell(&report, &url)) {
-        Some(html) => document(html),
-        None => handlers::home(),
+    match load(id, now()) {
+        Ok(report) => match shell(&report, &url) {
+            Some(html) => document(html),
+            // a shell without the page block is a build defect
+            None => handlers::page(StatusCode::INTERNAL_SERVER_ERROR),
+        },
+        Err(miss) => handlers::page(miss.status()),
     }
 }
 

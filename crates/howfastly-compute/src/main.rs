@@ -79,9 +79,9 @@ fn main() {
             send(resp);
             created.map(Event::Share)
         }
-        // the bare share path names nothing, a get goes home and other methods learn the one it takes
+        // the bare share path names nothing, other methods learn the one it takes
         (&Method::GET, "/share") => {
-            send(handlers::home());
+            send(handlers::page(StatusCode::NOT_FOUND));
             None
         }
         (_, "/share") => {
@@ -125,8 +125,9 @@ fn main() {
                 send(handlers::not_found());
                 None
             }
+            // a typo answers 404 under the shell, the app takes the visitor to the root
             None => {
-                send(handlers::home());
+                send(handlers::page(StatusCode::NOT_FOUND));
                 None
             }
         },

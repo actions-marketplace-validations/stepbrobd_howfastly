@@ -6,10 +6,11 @@ def fetch [path: string]: nothing -> record {
   http get --full --allow-errors --redirect-mode manual $path
 }
 
-# a dead link or a typo answers with a redirect to the live app
-def sent-home [response: record] {
-  assert equal $response.status 303
-  assert equal ($response.headers.response | where name == location | first | get value) "/"
+# a dead link or a typo answers the shell under the status, so the app can take the visitor home
+def shell-under [response: record, status: int] {
+  assert equal $response.status $status
+  assert ((($response.headers.response | where name == content-type | first | get value) | str lowercase) =~ "text/html")
+  assert (($response.body | into string) | str contains '<title>HowFastly: Internet Speed Test Powered by Fastly Compute</title>')
 }
 
 # the alias hostname hands its pages over to the canonical one, the api stays
@@ -103,8 +104,8 @@ def sharing [url: string] {
   assert (not ($html | str contains '</script><svg'))
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $link.url) "200"
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($link.url).json") "200"
-  sent-home (fetch $"($url)/share")
-  sent-home (fetch $"($url)/share/short")
+  shell-under (fetch $"($url)/share") 404
+  shell-under (fetch $"($url)/share/short") 404
   assert equal (fetch $"($url)/share/short.json" | get status) 404
   assert equal (http delete --full --allow-errors $link.url | get status) 405
   assert equal (http delete --full --allow-errors $link.url | get headers.response | where name == allow | first | get value) "GET, HEAD"
@@ -120,10 +121,10 @@ def sharing [url: string] {
 
   # the seeded record remains in KV despite being past its public expiry
   let expired = $"($url)/share/0000000000000000000000000000000000000000000000000000000000000000"
-  sent-home (fetch $expired)
+  shell-under (fetch $expired) 404
   assert equal (fetch $"($expired).json" | get status) 404
   let unsupported = $"($url)/share/1111111111111111111111111111111111111111111111111111111111111111"
-  sent-home (fetch $unsupported)
+  shell-under (fetch $unsupported) 422
   assert equal (fetch $"($unsupported).json" | get status) 422
   let missing = fetch $"($url)/share/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff.json"
   assert equal $missing.status 404
@@ -138,7 +139,8 @@ def checks [url: string, log: string] {
   assert equal (fetch $"($url)/down?bytes=abc" | get status) 400
   assert equal (http delete --full --allow-errors $"($url)/ping" | get status) 405
   assert equal (http delete --full --allow-errors $"($url)/ping" | get headers.response | where name == allow | first | get value) "GET, HEAD"
-  sent-home (fetch $"($url)/nope")
+  shell-under (fetch $"($url)/nope") 404
+  shell-under (fetch $"($url)/index.html") 404
   assert equal (fetch $"($url)/assets/nope.js" | get status) 404
   assert equal (http post --full --allow-errors $"($url)/nope" "" | get status) 404
 
@@ -176,7 +178,7 @@ def checks [url: string, log: string] {
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/") "200"
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/ping") "204"
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/down?bytes=1000") "200"
-  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/nope") "303"
+  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/nope") "404"
   assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/robots.txt") "200"
   assert ((curl -sI $"($url)/" | str lowercase) =~ "content-type: text/html")
   assert equal (http get $"($url)/down?bytes=1000000" | into binary | bytes length) 1000000

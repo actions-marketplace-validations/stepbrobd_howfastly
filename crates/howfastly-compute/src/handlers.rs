@@ -208,9 +208,14 @@ pub fn not_found() -> Response {
     Response::from_status(StatusCode::NOT_FOUND)
 }
 
-// a dead link or a typo sends the visitor to the live app
-pub fn home() -> Response {
-    Response::from_status(StatusCode::SEE_OTHER).with_header(header::LOCATION, "/")
+// the shell under a status, a visitor still lands in the app while a crawler reads the code
+pub fn page(status: StatusCode) -> Response {
+    match assets::shell() {
+        Some(html) => {
+            assets::headed(status, "text/html; charset=utf-8", "no-cache").with_body(html)
+        }
+        None => Response::from_status(status),
+    }
 }
 
 pub fn on_alias(req: &Request) -> bool {
