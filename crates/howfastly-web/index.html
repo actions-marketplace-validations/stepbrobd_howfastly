@@ -23,6 +23,33 @@
     <meta property="og:site_name" content="HowFastly" />
     <meta property="og:locale" content="en_US" />
     <meta name="twitter:card" content="summary" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "HowFastly",
+        "alternateName": "Fastly Speed Test",
+        "url": "https://speed.edgecompute.app/",
+        "description": "Free Fastly speed test. Measure download and upload throughput, latency and bufferbloat to the Fastly network, and see which Fastly POP serves you.",
+        "applicationCategory": "UtilitiesApplication",
+        "operatingSystem": "Any",
+        "browserRequirements": "Requires JavaScript and WebAssembly",
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "featureList": [
+          "Download and upload throughput at the 90th percentile",
+          "Unloaded and loaded latency with jitter",
+          "The Fastly POP and HTTP version that served the test",
+          "Shareable results and a command line client"
+        ],
+        "license": "https://www.apache.org/licenses/LICENSE-2.0",
+        "sameAs": [
+          "https://github.com/stepbrobd/howfastly",
+          "https://crates.io/crates/howfastly"
+        ],
+        "author": { "@type": "Person", "name": "Yifei Sun" }
+      }
+    </script>
     <link data-trunk rel="rust" data-wasm-opt="z" />
     <link data-trunk rel="css" href="style.css" />
     <link data-trunk rel="copy-file" href="assets/favicon.png" />

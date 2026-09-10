@@ -141,6 +141,7 @@ def checks [url: string, log: string] {
   let shell = http get $"($url)/" | into string
   assert ($shell | str contains '<link rel="canonical" href="https://speed.edgecompute.app/" />')
   assert ($shell | str contains '<title>HowFastly: Internet Speed Test Powered by Fastly Compute</title>')
+  assert ($shell | str contains 'type="application/ld+json"')
   for file in [favicon.ico favicon.png] {
     let icon = fetch $"($url)/($file)"
     assert equal $icon.status 200
