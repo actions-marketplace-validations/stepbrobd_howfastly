@@ -1,6 +1,6 @@
 use gloo_timers::future::TimeoutFuture;
 use howfastly::types::{Coordinates, MetaResponse};
-use howfastly_map::map::{self, View};
+use howfastly_map::map::{self, Side, View};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -14,7 +14,7 @@ const NARROW_PX: f64 = 640.0;
 const WIDE_COLUMN_PX: f64 = 1152.0;
 const COLUMN_PX: f64 = 585.0;
 const INSET_PX: f64 = 66.0;
-// the label text starts two spacing units right of its dot, then advances per glyph
+// the label text starts two spacing units off its dot, then advances per glyph
 const OFFSET_PX: f64 = 8.0;
 const CHAR_PX: f64 = 6.6;
 // fraction of the route extent kept clear on each side
@@ -158,25 +158,41 @@ pub fn Map(
             })
         })
     });
+    // the viewport the flight ends in
+    let target = Memo::new(move |_| route.get().and_then(|r| r.target(aspect)));
     let flight = RwSignal::new(0u32);
     let settled = RwSignal::new(false);
 
-    // towns are laid out once for the viewport the flight ends in
-    // the route labels are placed first, towns fill the space left
-    let towns = Memo::new(move |_| {
-        let Some((r, target)) = route.get().and_then(|r| r.target(aspect).map(|t| (r, t))) else {
-            return Vec::new();
-        };
-        let (you, pop) = names.get().unwrap_or_default();
+    // the strips the two route labels take in the target frame and the side of their dot
+    let anchors = Memo::new(move |_| {
+        let (r, target, (you, pop)) = (route.get()?, target.get()?, names.get()?);
         let strip = |p: (f64, f64), name: &str| {
             let (fx, fy) = target.frac(p);
             (fx, fy, map::width(name, text))
         };
-        let taken: Vec<(f64, f64, f64)> = r
-            .client
-            .map(|p| strip(p, &you))
+        let (a, b) = (
+            r.client.map(|p| strip(p, &you)),
+            r.pop.map(|p| strip(p, &pop)),
+        );
+        let sides = match (a, b) {
+            (Some(a), Some(b)) => map::sides(a, b, gap),
+            _ => (Side::Right, Side::Right),
+        };
+        Some((a.map(|a| (a, sides.0)), b.map(|b| (b, sides.1))))
+    });
+
+    // towns are laid out once for the viewport the flight ends in
+    // the route labels are placed first, towns fill the space left
+    let towns = Memo::new(move |_| {
+        let Some(target) = target.get() else {
+            return Vec::new();
+        };
+        let taken: Vec<(f64, f64, f64)> = anchors
+            .get()
             .into_iter()
-            .chain(r.pop.map(|p| strip(p, &pop)))
+            .flat_map(|(a, b)| [a, b])
+            .flatten()
+            .map(|(s, side)| map::strip(s, side))
             .collect();
         places.with_value(|p| {
             map::labels(p, &target, &taken, gap, text, limit)
@@ -190,7 +206,7 @@ pub fn Map(
     });
 
     Effect::new(move |_| {
-        let Some(to) = route.get().and_then(|r| r.target(aspect)) else {
+        let Some(to) = target.get() else {
             return;
         };
         let id = flight.get_untracked() + 1;
@@ -234,7 +250,7 @@ pub fn Map(
                         key=|t| (t.at.0.to_bits(), t.at.1.to_bits())
                         children=move |t| view! {
                             <path
-                                d=format!("M{:.1},{:.1}h0", t.at.0, t.at.1)
+                                d=format!("{}h0", map::path(&[t.at]))
                                 class="stroke-nord-4"
                                 stroke-width="4"
                                 stroke-linecap="round"
@@ -264,12 +280,12 @@ pub fn Map(
                     each=move || towns.get()
                     key=|t| (t.at.0.to_bits(), t.at.1.to_bits())
                     children=move |t| view! {
-                        <Label at=t.at view=view text=t.name class="text-xs text-nord-4"/>
+                        <Label at=t.at view=view text=t.name side=Side::Right class="text-xs text-nord-4"/>
                     }
                 />
-                {move || route.get().zip(names.get()).map(|(r, (you, pop))| view! {
-                    {r.client.map(|p| view! { <Label at=p view=view text=you class="text-nord-6"/> })}
-                    {r.pop.map(|p| view! { <Label at=p view=view text=pop class="text-nord-6"/> })}
+                {move || route.get().zip(names.get()).zip(anchors.get()).map(|((r, (you, pop)), (a, b))| view! {
+                    {r.client.zip(a).map(|(p, (_, side))| view! { <Label at=p view=view text=you side=side class="text-nord-6"/> })}
+                    {r.pop.zip(b).map(|(p, (_, side))| view! { <Label at=p view=view text=pop side=side class="text-nord-6"/> })}
                 })}
             </div>
             {children()}
@@ -290,7 +306,7 @@ pub fn Map(
 // the dark halo separates it from the land
 #[component]
 fn Dot(at: (f64, f64), class: &'static str) -> impl IntoView {
-    let d = format!("M{:.1},{:.1}h0", at.0, at.1);
+    let d = format!("{}h0", map::path(&[at]));
     view! {
         <path
             d=d.clone()
@@ -310,11 +326,22 @@ fn Dot(at: (f64, f64), class: &'static str) -> impl IntoView {
 }
 
 // html text pinned to a map point, it follows the viewport without a rebuild
+// two spacing units off its dot on the given side, on the left the text ends there
 #[component]
-fn Label(at: (f64, f64), view: RwSignal<View>, text: String, class: &'static str) -> impl IntoView {
+fn Label(
+    at: (f64, f64),
+    view: RwSignal<View>,
+    text: String,
+    side: Side,
+    class: &'static str,
+) -> impl IntoView {
+    let shift = match side {
+        Side::Right => "translate-x-2",
+        Side::Left => "translate-x-[calc(-100%_-_0.5rem)]",
+    };
     view! {
         <small
-            class=format!("absolute -translate-y-1/2 translate-x-2 whitespace-nowrap [text-shadow:0_0_4px_var(--color-nord-0)] {class}")
+            class=format!("absolute -translate-y-1/2 {shift} whitespace-nowrap [text-shadow:0_0_4px_var(--color-nord-0)] {class}")
             style=move || {
                 let (fx, fy) = view.get().frac(at);
                 format!("left:{:.2}%;top:{:.2}%", fx * 100.0, fy * 100.0)
