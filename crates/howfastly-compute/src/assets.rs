@@ -3,6 +3,8 @@ use fastly::http::{StatusCode, header};
 use include_dir::{Dir, include_dir};
 
 static DIST: Dir<'_> = include_dir!("$WEB_DIST");
+// the detail cells of the route map, cut by howfastly-gen, see howfastly_map::cells
+static CELLS: Dir<'_> = include_dir!("$CELLS");
 
 // the icon, robots and the sitemap keep fixed names, a day lets a replacement through
 pub const DAY: &str = "public, max-age=86400";
@@ -26,6 +28,13 @@ pub fn serve(path: &str) -> Option<Response> {
         headed(StatusCode::OK, howfastly::http::content_type(name), cache)
             .with_body(file.contents()),
     )
+}
+
+// a cell of the route map, a file exists for every cell and an empty one is open sea
+// the data changes only when it is regenerated, a day lets a new cut through
+pub fn cell(path: &str) -> Option<Response> {
+    let file = CELLS.get_file(path.strip_prefix("/cells/")?)?;
+    Some(headed(StatusCode::OK, "text/plain; charset=utf-8", DAY).with_body(file.contents()))
 }
 
 // the shell as text, the shared page rewrites its head

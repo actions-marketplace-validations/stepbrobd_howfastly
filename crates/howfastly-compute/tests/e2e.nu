@@ -168,6 +168,28 @@ def checks [url: string, log: string] {
     assert equal ($icon.headers.response | where name == cache-control | first | get value) "public, max-age=86400"
     assert (($icon.body | into binary | bytes at 1..3) == ("PNG" | into binary))
   }
+  # the detail cells of the route map, a file for every cell and an empty one for open sea
+  let cell = fetch $"($url)/cells/10m/-90_40.txt"
+  assert equal $cell.status 200
+  assert (($cell.headers.response | where name == content-type | first | get value) =~ "text/plain")
+  assert equal ($cell.headers.response | where name == cache-control | first | get value) "public, max-age=86400"
+  let body = $cell.body | into string
+  assert ($body | str starts-with "=land\n")
+  assert ($body | str contains "\n=urban\n")
+  assert ($body | str contains "\n=admin1\n")
+  assert ($body | str contains "\n=places\n")
+  assert ($body | str contains "\tChicago\n")
+  assert ((fetch $"($url)/cells/50m/-90_30.txt" | get body | into string) | str contains "=land\n")
+  assert equal ((fetch $"($url)/cells/10m/-150_-60.txt" | get body | into string) | str length) 0
+  assert equal (fetch $"($url)/cells/10m/nope.txt" | get status) 404
+  assert equal (fetch $"($url)/cells/10m/-95_40.txt" | get status) 404
+  assert equal (fetch $"($url)/cells/10m/" | get status) 404
+  assert equal (http delete --full --allow-errors $"($url)/cells/10m/-90_40.txt" | get status) 405
+  assert equal (http delete --full --allow-errors $"($url)/cells/10m/-90_40.txt" | get headers.response | where name == allow | first | get value) "GET, HEAD"
+  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/cells/10m/-90_40.txt") "200"
+  assert equal (via-alias $url "/cells/10m/-90_40.txt") "308 https://speed.edgecompute.app/cells/10m/-90_40.txt"
+  assert (($robots.body | into string) | str contains "Disallow: /cells\n")
+
   assert equal (via-alias $url "/") "308 https://speed.edgecompute.app/"
   assert equal (via-alias $url "/share/abc?x=1") "308 https://speed.edgecompute.app/share/abc?x=1"
   assert equal (via-alias $url "/robots.txt") "308 https://speed.edgecompute.app/robots.txt"

@@ -43,6 +43,7 @@
           cargoClippyExtraArgs = "--package howfastly-compute -- -D warnings";
           env.CARGO_BUILD_TARGET = "wasm32-wasip1";
           env.WEB_DIST = "${web}";
+          env.CELLS = "${pkgs.howfastly.cells}";
         });
 
         clippy-web = crane.lib.cargoClippy {

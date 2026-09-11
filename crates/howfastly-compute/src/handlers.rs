@@ -244,7 +244,7 @@ pub fn canonical(req: &Request) -> Response {
 // crawlers stay off the transfer and reporting endpoints, one hit on down costs 100 MB of egress
 pub fn robots() -> Response {
     assets::headed(StatusCode::OK, "text/plain; charset=utf-8", assets::DAY).with_body(format!(
-        "User-agent: *\nDisallow: /ping\nDisallow: /down\nDisallow: /up\nDisallow: /start\nDisallow: /finish\nDisallow: /meta\n\nSitemap: https://{HOST}/sitemap.xml\n"
+        "User-agent: *\nDisallow: /ping\nDisallow: /down\nDisallow: /up\nDisallow: /start\nDisallow: /finish\nDisallow: /meta\nDisallow: /cells\n\nSitemap: https://{HOST}/sitemap.xml\n"
     ))
 }
 

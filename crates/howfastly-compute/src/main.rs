@@ -107,6 +107,14 @@ fn main() {
             send(handlers::method_not_allowed("GET, HEAD"));
             None
         }
+        (&Method::GET, p) if p.starts_with("/cells/") => {
+            send(assets::cell(p).unwrap_or_else(handlers::not_found));
+            None
+        }
+        (_, p) if p.starts_with("/cells/") => {
+            send(handlers::method_not_allowed("GET, HEAD"));
+            None
+        }
         (_, "/ping" | "/down" | "/meta" | "/robots.txt" | "/sitemap.xml") => {
             send(handlers::method_not_allowed("GET, HEAD"));
             None
