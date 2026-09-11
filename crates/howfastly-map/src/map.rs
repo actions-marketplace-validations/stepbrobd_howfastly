@@ -4,9 +4,10 @@ use std::f64::consts::PI;
 pub const WORLD: f64 = 1000.0;
 // web mercator cuts off before the poles
 const MAX_LAT: f64 = 85.051_129;
-// natural earth land rings, country borders and populated places
-// regenerate with assets/gen.nu
+// natural earth 110m land rings, lakes and country borders with the most prominent places
+// the base every frame starts from, regenerate with assets/gen.nu
 pub const LAND: &str = include_str!("../assets/land.txt");
+pub const LAKES: &str = include_str!("../assets/lakes.txt");
 pub const BORDERS: &str = include_str!("../assets/borders.txt");
 pub const PLACES: &str = include_str!("../assets/places.txt");
 // margin kept after a label's text and between rows, in viewport fractions
@@ -679,12 +680,17 @@ mod tests {
         assert_eq!(places(""), Some(Vec::new()));
     }
 
+    // the base carries the places the widest frame under a detail level can still show
     #[test]
     fn places_parse_sorted() {
         let p = places(PLACES).unwrap();
-        assert!(p.len() > 1000);
+        assert!(p.len() > 500);
         assert!(p.windows(2).all(|w| w[0].zoom <= w[1].zoom));
-        assert!(p.iter().any(|t| t.name == "Grenoble"));
+        assert!(p.iter().any(|t| t.name == "Lyon"));
+        assert!(
+            p.iter()
+                .all(|t| t.zoom <= zoom(crate::cells::LEVELS[1].max_w))
+        );
     }
 
     #[test]
@@ -693,5 +699,8 @@ mod tests {
         assert!(d.starts_with('M') && d.ends_with('Z'));
         assert_eq!(d.matches('M').count(), LAND.lines().count());
         assert!(LAND.lines().count() > 100);
+        let lakes = land(LAKES).unwrap();
+        assert_eq!(lakes.matches('Z').count(), LAKES.lines().count());
+        assert!(LAKES.lines().count() > 10);
     }
 }

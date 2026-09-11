@@ -182,6 +182,7 @@ pub fn Map(
     children: Children,
 ) -> impl IntoView {
     let land = map::land(map::LAND).expect("land outline");
+    let lakes = map::land(map::LAKES).expect("lakes");
     let borders = map::borders(map::BORDERS).expect("borders");
     let places = StoredValue::new(map::places(map::PLACES).expect("places"));
     let (aspect, gap, limit, text) = frame();
@@ -303,6 +304,12 @@ pub fn Map(
                             d=land
                             class="fill-nord-2 stroke-nord-3"
                             fill-rule="evenodd"
+                            stroke-width="1"
+                            vector-effect="non-scaling-stroke"
+                        />
+                        <path
+                            d=lakes
+                            class="fill-nord-0 stroke-nord-3"
                             stroke-width="1"
                             vector-effect="non-scaling-stroke"
                         />

@@ -1,75 +1,44 @@
 #!/usr/bin/env nu
-# natural earth 1:110m land, 1:110m country borders and 1:10m populated places, public domain
-# land.txt holds one ring per line and borders.txt one border segment per line
-# both as lon,lat pairs rounded to a tenth of a degree
-# consecutive points that round together collapse into one
-# rings and segments left with fewer than three points are dropped
-# places.txt holds min_zoom, lon, lat and name tab separated
-# sorted by min_zoom and cut to keep the embedded file small
+# refreshes the base files next to this script from natural earth, public domain
+# the sources are the commit pkgs/howfastly/cells.nix pins, the cut itself is crates/howfastly-gen
+# the detail cells the compute embeds come from the same generator through nix, see pkgs/howfastly/cells.nix
 
-const land_source = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_land.geojson"
-const borders_source = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_boundary_lines_land.geojson"
-const places_source = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_populated_places_simple.geojson"
-const places_zoom = 6.5
+const rev = "ca96624a56bd078437bca8184e78163e5039ad19"
+const base = [
+  ne_110m_land
+  ne_110m_lakes
+  ne_110m_admin_0_boundary_lines_land
+  ne_10m_populated_places_simple
+]
+const detail = [
+  ne_50m_land
+  ne_50m_lakes
+  ne_50m_admin_0_boundary_lines_land
+  ne_50m_admin_1_states_provinces_lines
+  ne_10m_land
+  ne_10m_lakes
+  ne_10m_rivers_lake_centerlines
+  ne_10m_urban_areas
+  ne_10m_admin_0_boundary_lines_land
+  ne_10m_admin_1_states_provinces_lines
+]
 
-def dedup [] {
-    let points = $in
-    if ($points | length) < 2 {
-        return $points
-    }
-    [($points | first)] ++ ($points | window 2 | where {|w| $w.0 != $w.1 } | each {|w| $w.1 })
-}
-
-# every polyline becomes one line of rounded lon,lat pairs
-def polylines [] {
-    each {|points|
-        $points
-        | each {|p| $"(($p | first) | math round --precision 1),(($p | last) | math round --precision 1)" }
-        | dedup
-        | str join " "
-    }
-    | where {|line| ($line | split row " " | length) >= 3 }
-    | str join "\n"
-    | $"($in)\n"
-}
-
-def land [] {
-    http get $land_source
-    | from json
-    | get features.geometry.coordinates
-    | flatten
-    | polylines
-}
-
-# a multi line string nests one level deeper than a line string
-def borders [] {
-    http get $borders_source
-    | from json
-    | get features.geometry
-    | each {|g| if $g.type == "MultiLineString" { $g.coordinates } else { [$g.coordinates] } }
-    | flatten
-    | polylines
-}
-
-def places [] {
-    http get $places_source
-    | from json
-    | get features
-    | each {|f| {
-        zoom: $f.properties.min_zoom
-        lon: ($f.geometry.coordinates | first)
-        lat: ($f.geometry.coordinates | last)
-        name: $f.properties.name
-    } }
-    | where zoom <= $places_zoom
-    | sort-by zoom
-    | each {|p| $"($p.zoom | math round --precision 1)\t($p.lon | math round --precision 2)\t($p.lat | math round --precision 2)\t($p.name)" }
-    | str join "\n"
-    | $"($in)\n"
-}
-
-def main [] {
-    land | save --force land.txt
-    borders | save --force borders.txt
-    places | save --force places.txt
+# --cells also cuts the detail cells into that directory, as the nix build does
+def main [--cells: path] {
+  let sources = mktemp -d -t natural-earth-XXXXXX
+  let layers = if $cells == null { $base } else { $base ++ $detail }
+  for layer in $layers {
+    http get --raw $"https://raw.githubusercontent.com/nvkelso/natural-earth-vector/($rev)/geojson/($layer).geojson"
+    | save --force ($sources | path join $"($layer).geojson")
+  }
+  let out = if $cells == null { [] } else { [--cells $cells] }
+  # the download goes whether the cut succeeds or not
+  let failure = try {
+    cargo run --release --package howfastly-gen -- --sources $sources --base $env.FILE_PWD ...$out
+    null
+  } catch { |err| $err }
+  rm -r $sources
+  if $failure != null {
+    error make { msg: $failure.msg }
+  }
 }
