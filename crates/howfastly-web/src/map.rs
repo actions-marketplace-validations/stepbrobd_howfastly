@@ -21,8 +21,8 @@ const OFFSET_PX: f64 = 8.0;
 const CHAR_PX: f64 = 6.6;
 // fraction of the route extent kept clear on each side
 const PAD: f64 = 0.35;
-// narrowest viewport in map units so a short route keeps its surroundings
-const MIN_W: f64 = 24.0;
+// narrowest viewport in map units, a route within one city still shows the city around it
+const MIN_W: f64 = 12.0;
 const FLY_MS: f64 = 1500.0;
 const FRAME_MS: u32 = 16;
 const ARC_STEPS: usize = 64;
