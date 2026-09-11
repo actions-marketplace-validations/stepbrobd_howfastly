@@ -101,11 +101,12 @@ pub fn trace(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
     out
 }
 
+// a thousandth of a map unit stays under a pixel at any frame the floor allows
 pub fn path(points: &[(f64, f64)]) -> String {
     points
         .iter()
         .enumerate()
-        .map(|(i, (x, y))| format!("{}{x:.1},{y:.1}", if i == 0 { 'M' } else { 'L' }))
+        .map(|(i, (x, y))| format!("{}{x:.3},{y:.3}", if i == 0 { 'M' } else { 'L' }))
         .collect()
 }
 
@@ -413,7 +414,10 @@ mod tests {
         let t = trace(&[(-122.4, 37.8), (139.7, 35.7)]);
         assert!(t[1].0 < t[0].0);
         assert!((t[0].0 - t[1].0) < WORLD / 2.0);
-        assert_eq!(path(&[(1.0, 2.0), (3.04, 4.06)]), "M1.0,2.0L3.0,4.1");
+        assert_eq!(
+            path(&[(1.0, 2.0), (3.0004, 4.0006)]),
+            "M1.000,2.000L3.000,4.001"
+        );
         assert_eq!(path(&[]), "");
     }
 
@@ -456,13 +460,13 @@ mod tests {
         assert_eq!(land(""), Some(String::new()));
         assert_eq!(
             land("0,0 180,0 0,90\n-180,0\n"),
-            Some("M500.0,500.0L1000.0,500.0L500.0,0.0ZM0.0,500.0Z".to_string())
+            Some("M500.000,500.000L1000.000,500.000L500.000,0.000ZM0.000,500.000Z".to_string())
         );
         assert_eq!(land("0,0 nope"), None);
         assert_eq!(land("0;0"), None);
         assert_eq!(
             borders("0,0 180,0\n-180,0 0,0\n"),
-            Some("M500.0,500.0L1000.0,500.0M0.0,500.0L500.0,500.0".to_string())
+            Some("M500.000,500.000L1000.000,500.000M0.000,500.000L500.000,500.000".to_string())
         );
         assert_eq!(borders("1,1 x"), None);
     }
