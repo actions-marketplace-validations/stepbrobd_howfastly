@@ -57,6 +57,13 @@ pub fn project(lon: f64, lat: f64) -> (f64, f64) {
     (x, y.clamp(0.0, WORLD))
 }
 
+// the inverse of project, y clamped to the world square
+pub fn unproject(x: f64, y: f64) -> (f64, f64) {
+    let lon = x / WORLD * 360.0 - 180.0;
+    let k = PI * (1.0 - 2.0 * y.clamp(0.0, WORLD) / WORLD);
+    (lon, (2.0 * k.exp().atan() - PI / 2.0).to_degrees())
+}
+
 fn unit(lon: f64, lat: f64) -> (f64, f64, f64) {
     let (lon, lat) = (lon.to_radians(), lat.to_radians());
     (lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin())
@@ -189,7 +196,7 @@ pub fn places(text: &str) -> Option<Vec<Place>> {
 }
 
 // the web mercator zoom a viewport width amounts to on a screen about a thousand pixels wide
-fn zoom(w: f64) -> f64 {
+pub fn zoom(w: f64) -> f64 {
     (WORLD / w).log2() + 2.0
 }
 
@@ -457,6 +464,16 @@ mod tests {
         assert_eq!(path(&[]), "");
     }
 
+    proptest! {
+        #[test]
+        fn unproject_inverts_project(lon in -180.0f64..=180.0, lat in -85.0f64..=85.0) {
+            let (x, y) = project(lon, lat);
+            let (lon2, lat2) = unproject(x, y);
+            prop_assert!((lon - lon2).abs() < 1e-9);
+            prop_assert!((lat - lat2).abs() < 1e-9);
+        }
+    }
+
     #[test]
     fn sides_exact() {
         let gap = (0.03, 0.05);
@@ -488,6 +505,10 @@ mod tests {
     #[test]
     fn project_exact() {
         assert_eq!(project(0.0, 0.0), (500.0, 500.0));
+        assert_eq!(unproject(500.0, 500.0), (0.0, 0.0));
+        assert_eq!(unproject(1000.0, 500.0).0, 180.0);
+        assert!(unproject(0.0, 0.0).1 > 85.0);
+        assert!(unproject(0.0, 2000.0).1 < -85.0);
         assert_eq!(project(180.0, 0.0), (1000.0, 500.0));
         assert_eq!(project(-180.0, 0.0), (0.0, 500.0));
         assert!(project(0.0, 90.0).1 < 1e-3);
