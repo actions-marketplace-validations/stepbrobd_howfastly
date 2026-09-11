@@ -7,6 +7,7 @@
       workspace = crane.fileSetForCrates (lib.map crate [
         "howfastly"
         "howfastly-compute"
+        "howfastly-gen"
         "howfastly-map"
         "howfastly-web"
       ]);

@@ -999,6 +999,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "howfastly-gen"
+version = "2026.910.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "howfastly-map",
+ "serde_json",
+]
+
+[[package]]
 name = "howfastly-map"
 version = "2026.910.1"
 dependencies = [

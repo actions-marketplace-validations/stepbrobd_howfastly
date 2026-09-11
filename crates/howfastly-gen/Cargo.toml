@@ -1,0 +1,13 @@
+[package]
+name    = "howfastly-gen"
+publish = false
+
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+
+[dependencies]
+anyhow.workspace        = true
+clap.workspace          = true
+howfastly-map.workspace = true
+serde_json.workspace    = true
