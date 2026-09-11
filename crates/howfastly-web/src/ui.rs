@@ -65,7 +65,14 @@ pub fn App() -> impl IntoView {
             <RouteBar meta=state.meta.into() tip=tips::ROUTE/>
 
             <section class="rounded bg-nord-1 p-4">
-                <Map meta=state.meta.into() active=Signal::derive(move || !gate.get())>
+                // the map fetches its detail only once the latency probes are done
+                <Map
+                    meta=state.meta.into()
+                    active=Signal::derive(move || !gate.get())
+                    quiet=Signal::derive(move || {
+                        state.phase.get() == Phase::Idle || state.latency.get().is_some()
+                    })
+                >
                     <Controls state=state/>
                 </Map>
             </section>
@@ -247,7 +254,7 @@ fn Viewer(report: Report) -> impl IntoView {
         <RouteBar meta=meta tip=tips::PUBLICATION/>
 
         <section class="rounded bg-nord-1 p-4">
-            <Map meta=meta active=RwSignal::new(true).into()>
+            <Map meta=meta active=RwSignal::new(true).into() quiet=RwSignal::new(true).into()>
                 <a
                     class="absolute bottom-1 left-1 rounded bg-nord-10 px-3 py-1 text-sm text-nord-6 hover:bg-nord-9"
                     href="/"

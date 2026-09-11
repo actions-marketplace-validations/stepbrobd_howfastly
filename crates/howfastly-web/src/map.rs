@@ -1,6 +1,8 @@
+use futures::future::join_all;
 use gloo_timers::future::TimeoutFuture;
 use howfastly::types::{Coordinates, MetaResponse};
-use howfastly_map::map::{self, Side, View};
+use howfastly_map::cells::{self, Level, Paths};
+use howfastly_map::map::{self, Place, Side, View};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
@@ -100,6 +102,14 @@ struct Town {
     at: (f64, f64),
 }
 
+// the detail under a landed frame, fetched for one flight
+#[derive(Clone, PartialEq)]
+struct Detail {
+    flight: u32,
+    paths: Paths,
+    places: Vec<Place>,
+}
+
 // glide the viewport to its target, a newer flight takes over mid-air
 // settled marks the landing, the labels laid out for the target wait for it
 async fn fly(
@@ -125,12 +135,50 @@ async fn fly(
     }
 }
 
+// the cells under the target frame
+// any failure leaves the base map and its towns in place and says so in the console
+async fn load(
+    detail: RwSignal<Option<Detail>>,
+    flight: RwSignal<u32>,
+    id: u32,
+    level: &'static Level,
+    to: View,
+) {
+    let urls: Vec<String> = level.keys(&to).into_iter().map(|k| level.url(k)).collect();
+    let fetched = join_all(urls.iter().map(|url| engine::text(url))).await;
+    let mut loaded = Vec::with_capacity(fetched.len());
+    for (url, text) in urls.iter().zip(fetched) {
+        let cell = match text {
+            Ok(text) => cells::parse(&text),
+            Err(e) => {
+                web_sys::console::warn_1(&format!("{url} failed, {}", engine::describe(e)).into());
+                return;
+            }
+        };
+        let Some(cell) = cell else {
+            web_sys::console::warn_1(&format!("{url} does not parse").into());
+            return;
+        };
+        loaded.push(cell);
+    }
+    if flight.get_untracked() != id {
+        return;
+    }
+    detail.set(Some(Detail {
+        flight: id,
+        paths: cells::paths(&loaded, to.x + to.w / 2.0),
+        places: cells::places(&loaded),
+    }));
+}
+
 // active gates the flight, nothing moves before the visitor confirms the first run
+// quiet says the connection carries no latency probes, the cells wait for it
 // children overlay the frame, the run controls sit in its corner
 #[component]
 pub fn Map(
     meta: Signal<Option<MetaResponse>>,
     active: Signal<bool>,
+    quiet: Signal<bool>,
     children: Children,
 ) -> impl IntoView {
     let land = map::land(map::LAND).expect("land outline");
@@ -162,6 +210,11 @@ pub fn Map(
     let target = Memo::new(move |_| route.get().and_then(|r| r.target(aspect)));
     let flight = RwSignal::new(0u32);
     let settled = RwSignal::new(false);
+    let detail: RwSignal<Option<Detail>> = RwSignal::new(None);
+    // the detail is on screen once landed and fetched for this flight
+    let shown = Memo::new(move |_| {
+        settled.get() && detail.with(|d| d.as_ref().is_some_and(|d| d.flight == flight.get()))
+    });
 
     // the strips the two route labels take in the target frame and the side of their dot
     let anchors = Memo::new(move |_| {
@@ -182,7 +235,7 @@ pub fn Map(
     });
 
     // towns are laid out once for the viewport the flight ends in
-    // the route labels are placed first, towns fill the space left
+    // the route labels are placed first and towns fill the space left, from the cells once they are in
     let towns = Memo::new(move |_| {
         let Some(target) = target.get() else {
             return Vec::new();
@@ -194,7 +247,7 @@ pub fn Map(
             .flatten()
             .map(|(s, side)| map::strip(s, side))
             .collect();
-        places.with_value(|p| {
+        let lay = |p: &[Place]| {
             map::labels(p, &target, &taken, gap, text, limit)
                 .into_iter()
                 .map(|l| Town {
@@ -202,6 +255,10 @@ pub fn Map(
                     at: l.at,
                 })
                 .collect::<Vec<Town>>()
+        };
+        detail.with(|d| match d.as_ref().filter(|d| d.flight == flight.get()) {
+            Some(d) => lay(&d.places),
+            None => places.with_value(|p| lay(p)),
         })
     });
 
@@ -212,7 +269,25 @@ pub fn Map(
         let id = flight.get_untracked() + 1;
         flight.set(id);
         settled.set(false);
+        detail.set(None);
         spawn_local(fly(view, flight, settled, id, to));
+    });
+
+    // one fetch per flight, once the connection is quiet, the transfers do not mind a few kilobytes
+    let requested = RwSignal::new(0u32);
+    Effect::new(move |_| {
+        let id = flight.get();
+        if id == 0 || !quiet.get() || requested.get_untracked() == id {
+            return;
+        }
+        let Some((to, level)) = target
+            .get_untracked()
+            .and_then(|to| cells::level(to.w).map(|level| (to, level)))
+        else {
+            return;
+        };
+        requested.set(id);
+        spawn_local(load(detail, flight, id, level, to));
     });
 
     view! {
@@ -241,9 +316,60 @@ pub fn Map(
                     </g>
                 </defs>
                 // copies on both sides so a route over the antimeridian keeps its land
-                <use href="#tile" x=format!("{}", -map::WORLD)/>
-                <use href="#tile"/>
-                <use href="#tile" x=format!("{}", map::WORLD)/>
+                // the base gives way to the cells once they are drawn
+                <g class="transition-opacity duration-300" class=("opacity-0", move || shown.get())>
+                    <use href="#tile" x=format!("{}", -map::WORLD)/>
+                    <use href="#tile"/>
+                    <use href="#tile" x=format!("{}", map::WORLD)/>
+                </g>
+                // cells overlap their neighbors by a hair and the areas fill nonzero, so the overlap
+                // stays filled, the areas stroke under their fill, so the edges where cells abut
+                // vanish under the neighbor and a coast keeps the outer half of a doubled stroke
+                // the urban fill is opaque so the overlap of two cells does not darken
+                <g class="transition-opacity duration-300" class=("opacity-0", move || !shown.get())>
+                    {move || detail.get().map(|d| view! {
+                        <path
+                            d=d.paths.land
+                            class="fill-nord-2 stroke-nord-3"
+                            paint-order="stroke"
+                            stroke-width="2"
+                            vector-effect="non-scaling-stroke"
+                        />
+                        <path
+                            d=d.paths.urban
+                            class="fill-[color-mix(in_srgb,var(--color-nord-2),var(--color-nord-3)_55%)]"
+                        />
+                        <path
+                            d=d.paths.lakes
+                            class="fill-nord-0 stroke-nord-3"
+                            paint-order="stroke"
+                            stroke-width="2"
+                            vector-effect="non-scaling-stroke"
+                        />
+                        <path
+                            d=d.paths.rivers
+                            fill="none"
+                            class="stroke-nord-0"
+                            stroke-width="1"
+                            vector-effect="non-scaling-stroke"
+                        />
+                        <path
+                            d=d.paths.admin1
+                            fill="none"
+                            class="stroke-nord-3"
+                            stroke-width="1"
+                            stroke-dasharray="3 3"
+                            vector-effect="non-scaling-stroke"
+                        />
+                        <path
+                            d=d.paths.borders
+                            fill="none"
+                            class="stroke-nord-3"
+                            stroke-width="1"
+                            vector-effect="non-scaling-stroke"
+                        />
+                    })}
+                </g>
                 <g class="transition-opacity duration-300" class=("opacity-0", move || !settled.get())>
                     <For
                         each=move || towns.get()

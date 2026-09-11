@@ -1020,6 +1020,7 @@ name = "howfastly-web"
 version = "2026.910.1"
 dependencies = [
  "console_error_panic_hook",
+ "futures",
  "gloo-timers",
  "howfastly",
  "howfastly-map",

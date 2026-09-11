@@ -14,6 +14,7 @@ test = false
 
 [dependencies]
 console_error_panic_hook.workspace = true
+futures.workspace                  = true
 gloo-timers.workspace              = true
 howfastly.workspace                = true
 howfastly-map.workspace            = true
@@ -24,5 +25,5 @@ wasm-bindgen.workspace             = true
 wasm-bindgen-futures.workspace     = true
 
 [dependencies.web-sys]
-features  = ["AbortController", "AbortSignal", "Clipboard", "Document", "Element", "Headers", "Location", "Navigator", "Node", "Performance", "ProgressEvent", "ReadableStream", "ReadableStreamDefaultReader", "ReadableStreamReadResult", "RequestInit", "Response", "Storage", "Window", "XmlHttpRequest", "XmlHttpRequestEventTarget", "XmlHttpRequestUpload"]
+features  = ["AbortController", "AbortSignal", "Clipboard", "Document", "Element", "Headers", "Location", "Navigator", "Node", "Performance", "ProgressEvent", "ReadableStream", "ReadableStreamDefaultReader", "ReadableStreamReadResult", "RequestInit", "Response", "Storage", "Window", "XmlHttpRequest", "XmlHttpRequestEventTarget", "XmlHttpRequestUpload", "console"]
 workspace = true

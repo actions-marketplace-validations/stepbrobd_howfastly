@@ -86,6 +86,15 @@ pub async fn report(id: &str) -> Result<(u16, String), JsValue> {
     exchange("GET", &format!("/share/{id}.json"), None).await
 }
 
+// a text file of this origin, anything but a 200 is an error
+pub async fn text(url: &str) -> Result<String, JsValue> {
+    let (status, body) = exchange("GET", url, None).await?;
+    if status != 200 {
+        return Err(JsValue::from_str(&format!("{url} answered {status}")));
+    }
+    Ok(body)
+}
+
 // the message of a js error as a sentence, the debug form of anything else
 pub fn describe(e: JsValue) -> String {
     let text = e
