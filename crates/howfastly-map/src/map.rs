@@ -201,10 +201,46 @@ pub struct Label<'a> {
     pub frac: (f64, f64),
 }
 
-// the width a label takes right of its dot, in viewport fractions
+// the width a label takes beside its dot, in viewport fractions
 // text is the offset from the dot to the first glyph and the advance per glyph
 pub fn width(name: &str, text: (f64, f64)) -> f64 {
     text.0 + name.chars().count() as f64 * text.1
+}
+
+// the side of its dot a label sits on
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Right,
+    Left,
+}
+
+// where the two route labels go, both prefer the right of their dot
+// a colliding pair sends the western one left, a label running off the right edge goes left too
+pub fn sides(a: (f64, f64, f64), b: (f64, f64, f64), gap: (f64, f64)) -> (Side, Side) {
+    let collide = (a.1 - b.1).abs() < gap.1 && a.0 < b.0 + b.2 + gap.0 && b.0 < a.0 + a.2 + gap.0;
+    let mut sides = (Side::Right, Side::Right);
+    if collide {
+        if a.0 <= b.0 {
+            sides.0 = Side::Left;
+        } else {
+            sides.1 = Side::Left;
+        }
+    }
+    if sides.0 == Side::Right && a.0 + a.2 > 1.0 {
+        sides.0 = Side::Left;
+    }
+    if sides.1 == Side::Right && b.0 + b.2 > 1.0 {
+        sides.1 = Side::Left;
+    }
+    sides
+}
+
+// the strip a label occupies, on the left it ends at its dot
+pub fn strip((fx, fy, w): (f64, f64, f64), side: Side) -> (f64, f64, f64) {
+    match side {
+        Side::Right => (fx, fy, w),
+        Side::Left => (fx - w, fy, w),
+    }
 }
 
 // places worth a label in the viewport, in order of prominence
@@ -419,6 +455,34 @@ mod tests {
             "M1.000,2.000L3.000,4.001"
         );
         assert_eq!(path(&[]), "");
+    }
+
+    #[test]
+    fn sides_exact() {
+        let gap = (0.03, 0.05);
+        let right = (Side::Right, Side::Right);
+        assert_eq!(sides((0.1, 0.5, 0.1), (0.5, 0.5, 0.1), gap), right);
+        assert_eq!(sides((0.1, 0.5, 0.1), (0.1, 0.6, 0.1), gap), right);
+        // the western label of a colliding pair goes left, whichever comes first
+        assert_eq!(
+            sides((0.1, 0.5, 0.1), (0.15, 0.51, 0.1), gap),
+            (Side::Left, Side::Right)
+        );
+        assert_eq!(
+            sides((0.15, 0.51, 0.1), (0.1, 0.5, 0.1), gap),
+            (Side::Right, Side::Left)
+        );
+        // a label that would leave the frame goes left, so does one flipped away from the edge
+        assert_eq!(
+            sides((0.95, 0.5, 0.1), (0.1, 0.1, 0.1), gap),
+            (Side::Left, Side::Right)
+        );
+        assert_eq!(
+            sides((0.85, 0.5, 0.1), (0.9, 0.5, 0.2), gap),
+            (Side::Left, Side::Left)
+        );
+        assert_eq!(strip((0.5, 0.5, 0.1), Side::Right), (0.5, 0.5, 0.1));
+        assert_eq!(strip((0.5, 0.5, 0.1), Side::Left), (0.4, 0.5, 0.1));
     }
 
     #[test]
