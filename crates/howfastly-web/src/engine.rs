@@ -193,9 +193,11 @@ pub async fn download(
     Ok(stats::mbps(bytes, secs))
 }
 
+// xhr upload progress can report a buffered body before it reaches the wire
+// report the body at request completion so its timestamp closes the measured span
 pub async fn upload(
     bytes: u64,
-    mut on_progress: impl FnMut(f64, u64) + 'static,
+    mut on_complete: impl FnMut(f64, u64),
     signal: &AbortSignal,
 ) -> Result<f64, JsValue> {
     let xhr = XmlHttpRequest::new()?;
@@ -214,12 +216,6 @@ pub async fn upload(
         *resolve.borrow_mut() = Some(res);
     });
 
-    let onprogress = Closure::<dyn FnMut(ProgressEvent)>::new(move |e: ProgressEvent| {
-        on_progress(now_ms(), e.loaded() as u64);
-    });
-    xhr.upload()?
-        .set_onprogress(Some(onprogress.as_ref().unchecked_ref()));
-
     let onloadend = Closure::<dyn FnMut(ProgressEvent)>::new({
         let resolve = resolve.clone();
         move |_: ProgressEvent| {
@@ -236,6 +232,7 @@ pub async fn upload(
     let start = now_ms();
     xhr.send_with_opt_buffer_source(Some(&body))?;
     JsFuture::from(promise).await?;
+    let end = now_ms();
     signal.set_onabort(None);
 
     let status = xhr.status().unwrap_or(0);
@@ -250,7 +247,8 @@ pub async fn upload(
             .flatten()
             .as_deref(),
     );
-    let secs = ((now_ms() - start - server_ms) / 1e3).max(1e-9);
+    let secs = ((end - start - server_ms) / 1e3).max(1e-9);
+    on_complete(end, bytes);
     Ok(stats::mbps(bytes, secs))
 }
 

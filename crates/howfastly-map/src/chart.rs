@@ -56,6 +56,14 @@ pub fn svg_path(points: &[(f64, f64)], width: f64, height: f64, max: f64) -> Str
 // events are (elapsed ms, bytes since previous event) in time order
 // emit at most one point per emit_ms
 // speed is measured over the trailing window_ms
+//
+// each event carries the bytes of the whole span back to its predecessor, so
+// only the part of that span lying inside the window may count towards it. spans
+// tile the window exactly, which makes a point the time weighted mean of the
+// event rates it covers and bounds it by the fastest of them. counting a
+// straddling event whole would credit the window with bytes that took longer
+// than the window to send. upload events are recorded at request completion to
+// preserve this invariant
 pub fn throughput_points(events: &[(f64, u64)], window_ms: f64, emit_ms: f64) -> Vec<(f64, f64)> {
     let mut out = Vec::new();
     let mut next_emit = emit_ms;
@@ -64,14 +72,25 @@ pub fn throughput_points(events: &[(f64, u64)], window_ms: f64, emit_ms: f64) ->
             continue;
         }
         let from = t - window_ms;
-        let bytes: u64 = events[..=i]
-            .iter()
-            .rev()
-            .take_while(|&&(tt, _)| tt > from)
-            .map(|&(_, b)| b)
-            .sum();
+        let mut bits = 0.0;
+        for j in (0..=i).rev() {
+            let (at, bytes) = events[j];
+            if at <= from {
+                break;
+            }
+            // the first event covers the run from zero, a repeated timestamp covers
+            // no time at all and keeps its bytes rather than losing them
+            let prev = if j == 0 { 0.0 } else { events[j - 1].0 };
+            let span = at - prev;
+            let inside = if span > 0.0 {
+                ((at - prev.max(from)) / span).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            bits += bytes as f64 * 8.0 * inside;
+        }
         let secs = (window_ms.min(t).max(f64::EPSILON)) / 1e3;
-        out.push((t / 1e3, bytes as f64 * 8.0 / secs));
+        out.push((t / 1e3, bits / secs));
         next_emit = t + emit_ms;
     }
     out
@@ -181,6 +200,31 @@ mod tests {
                 prop_assert!(bps.is_finite() && bps >= 0.0);
             }
         }
+
+        // a point is a time weighted mean of the rates of the events it covers,
+        // so no point may read faster than the fastest event in the series
+        #[test]
+        fn throughput_points_bounded_by_the_fastest_event(
+            deltas in prop::collection::vec((0.1f64..5000.0, 0u64..10_000_000), 1..300),
+        ) {
+            let mut t = 0.0;
+            let events: Vec<(f64, u64)> = deltas
+                .into_iter()
+                .map(|(dt, b)| {
+                    t += dt;
+                    (t, b)
+                })
+                .collect();
+            let mut prev = 0.0;
+            let mut fastest = 0.0f64;
+            for &(at, bytes) in &events {
+                fastest = fastest.max(bytes as f64 * 8.0 / ((at - prev) / 1e3));
+                prev = at;
+            }
+            for &(_, bps) in &throughput_points(&events, 500.0, 100.0) {
+                prop_assert!(bps <= fastest * (1.0 + 1e-9), "{bps} over {fastest}");
+            }
+        }
     }
 
     #[test]
@@ -191,5 +235,20 @@ mod tests {
         // 1000 bytes * 8 bits over 0.2s = 40_000 bps at t 0.2s
         let pts = throughput_points(&[(200.0, 1_000)], 500.0, 100.0);
         assert_eq!(pts, vec![(0.2, 40_000.0)]);
+    }
+
+    // upload events close completed transfers. the first larger body must use its
+    // own duration rather than the preceding smaller body's duration
+    #[test]
+    fn throughput_points_upload_size_transition() {
+        let mut events = vec![(460.0, 1_000_000)];
+        events.extend((1..=6).map(|i| (460.0 + f64::from(i) * 4480.0, 10_000_000)));
+        let pts = throughput_points(&events, 500.0, 100.0);
+        assert_eq!(pts.len(), 7);
+        assert!((pts[0].1 - 17.391e6).abs() < 1e4, "{}", pts[0].1);
+        for &(_, bps) in &pts[1..] {
+            assert!((bps - 17.857e6).abs() < 1e4, "{bps}");
+        }
+        assert!(peak(&pts) < 18e6, "{}", peak(&pts));
     }
 }
