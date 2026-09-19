@@ -15,7 +15,7 @@
 
         nixpkgs.instances.pkgs = inputs.nixpkgs;
         nixpkgs.overlays = with inputs; [
-          rust-overlay.overlays.default
+          fenix.overlays.default
           self.overlays.default
         ];
       };
@@ -34,8 +34,8 @@
     autopilot.inputs.systems.follows = "systems";
     # c
     crane.url = "github:ipetkov/crane";
-    # r
-    rust-overlay.url = "github:oxalica/rust-overlay";
-    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    # f
+    fenix.url = "github:nix-community/fenix";
+    fenix.inputs.nixpkgs.follows = "nixpkgs";
   };
 }

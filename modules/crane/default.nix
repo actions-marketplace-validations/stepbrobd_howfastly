@@ -5,10 +5,11 @@ let inherit (inputs.nixpkgs) lib; in
 pkgs: # pass from call site
 
 lib.fix (crane: {
-  toolchain = pkgs.rust-bin.stable.latest.minimal.override {
-    extensions = [ "clippy" "rust-analyzer" "rust-src" "rustfmt" ];
-    targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
-  };
+  toolchain = with pkgs.fenix; combine [
+    (stable.withComponents [ "cargo" "clippy" "rust-analyzer" "rust-src" "rustc" "rustfmt" ])
+    targets.wasm32-unknown-unknown.stable.rust-std
+    targets.wasm32-wasip1.stable.rust-std
+  ];
 
   lib = (inputs.crane.mkLib pkgs).overrideToolchain crane.toolchain;
 
