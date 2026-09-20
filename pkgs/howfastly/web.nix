@@ -19,12 +19,10 @@ let
         ../../crates/howfastly-web
         (lib.fileset.maybeMissing ../../crates/howfastly-web/dist))
       (crane.lib.fileset.commonCargoSources ../../crates/howfastly)
+      (crane.lib.fileset.commonCargoSources ../../crates/howfastly-map)
+      ../../crates/howfastly-map/assets
     ];
   };
-in
-crane.lib.buildTrunkPackage {
-  pname = "howfastly-web";
-  inherit src version;
 
   cargoArtifacts = crane.lib.buildDepsOnly {
     pname = "howfastly-web";
@@ -33,7 +31,16 @@ crane.lib.buildTrunkPackage {
     cargoExtraArgs = "--package howfastly-web";
     doCheck = false;
     env.CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+    # trunk builds under the wasm profile from Trunk.toml, the deps must match
+    env.CARGO_PROFILE = "wasm";
   };
+in
+crane.lib.buildTrunkPackage {
+  pname = "howfastly-web";
+  inherit src version cargoArtifacts;
+
+  # the clippy check lints against the same dependencies
+  passthru = { inherit cargoArtifacts; };
 
   strictDeps = true;
   cargoExtraArgs = "--package howfastly-web";

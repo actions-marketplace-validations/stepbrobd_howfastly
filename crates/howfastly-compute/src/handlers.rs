@@ -1,10 +1,62 @@
 use std::io::{Read, Write};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use fastly::http::{StatusCode, header};
+use fastly::cache::simple::{self, CacheEntry};
+use fastly::http::{StatusCode, Url, Version, header};
 use fastly::{Request, Response};
 
+use crate::assets;
+
 static CHUNK: [u8; 64 * 1024] = [0x55; 64 * 1024];
+
+// the site lives on one hostname, the alias hands its pages over and keeps answering the api
+pub const HOST: &str = "speed.edgecompute.app";
+const ALIAS: &str = "howfastly.edgecompute.app";
+
+const SECRET_STORE: &str = "secretstore";
+const API_KEY: &str = "fastly-api-key";
+const API_BACKEND: &str = "fastly";
+
+// the error names the step that failed so the log says why meta degraded
+fn pop_info(code: &str) -> Result<howfastly::types::Pop, String> {
+    if code.is_empty() {
+        return Err("pop code empty".into());
+    }
+    let body = simple::get_or_set_with("datacenters", || {
+        let resp = Request::get("https://api.fastly.com/datacenters")
+            .with_header("fastly-key", api_key().map_err(fastly::Error::msg)?)
+            .send(API_BACKEND)?;
+        if resp.get_status() != StatusCode::OK {
+            return Err(fastly::Error::msg("datacenters request failed"));
+        }
+        Ok(CacheEntry {
+            value: resp.into_body(),
+            ttl: Duration::from_secs(86_400),
+        })
+    })
+    .map_err(|e| format!("datacenters fetch failed, {e}"))?
+    .ok_or("datacenters cache empty")?;
+
+    let pops: Vec<howfastly::types::Pop> =
+        serde_json::from_reader(body).map_err(|_| "datacenters body invalid")?;
+    pops.into_iter()
+        .find(|pop| pop.code.eq_ignore_ascii_case(code))
+        .ok_or_else(|| "pop unknown to the api".to_string())
+}
+
+fn api_key() -> Result<String, &'static str> {
+    let store = fastly::secret_store::SecretStore::open(SECRET_STORE)
+        .map_err(|_| "secret store missing")?;
+    let secret = store
+        .try_get(API_KEY)
+        .map_err(|_| "secret store unreadable")?
+        .ok_or("api key missing")?;
+    let plaintext = secret.try_plaintext().map_err(|_| "api key unreadable")?;
+    Ok(std::str::from_utf8(&plaintext)
+        .map_err(|_| "api key not utf8")?
+        .trim()
+        .to_string())
+}
 
 fn base(status: StatusCode, start: Instant) -> Response {
     let dur = start.elapsed().as_secs_f64() * 1e3;
@@ -16,11 +68,28 @@ fn base(status: StatusCode, start: Instant) -> Response {
         .with_header("server-timing", format!("app;dur={dur:.3}"))
 }
 
-pub fn ping(start: Instant) -> Response {
+pub fn ack(start: Instant) -> Response {
     base(StatusCode::NO_CONTENT, start)
 }
 
-pub fn down(req: Request, start: Instant) {
+// a run report is analytics only
+// anything unparsable or oversized is a bad request and counts nothing
+pub fn finish(req: &mut Request, start: Instant) -> (Response, Option<howfastly::types::Run>) {
+    let mut buf = Vec::new();
+    let read = req
+        .take_body()
+        .take(64 * 1024)
+        .read_to_end(&mut buf)
+        .is_ok();
+    let run = read.then(|| serde_json::from_slice(&buf).ok()).flatten();
+    let status = match run {
+        Some(_) => StatusCode::NO_CONTENT,
+        None => StatusCode::BAD_REQUEST,
+    };
+    (base(status, start), run)
+}
+
+pub fn down(req: &Request, start: Instant, head: bool) {
     let Some(n) = howfastly::http::parse_bytes(req.get_query_parameter("bytes")) else {
         base(StatusCode::BAD_REQUEST, start).send_to_client();
         return;
@@ -29,6 +98,10 @@ pub fn down(req: Request, start: Instant) {
     let resp = base(StatusCode::OK, start)
         .with_header(header::CONTENT_TYPE, "application/octet-stream")
         .with_header(header::CONTENT_LENGTH, n.to_string());
+    if head {
+        resp.send_to_client();
+        return;
+    }
 
     let mut body = resp.stream_to_client();
     let mut left = n;
@@ -43,17 +116,18 @@ pub fn down(req: Request, start: Instant) {
     let _ = body.finish();
 }
 
-pub fn up(req: Request) -> Response {
+pub fn up(req: &mut Request) -> Response {
     // drain with large reads
     // viceroy rebuffers the unread remainder on every read
     // small buffers therefore make big uploads quadratic
-    let mut body = req.into_body();
+    let mut body = req.take_body();
     let mut buf = vec![0u8; 2 * 1024 * 1024];
     let mut received: u64 = 0;
     loop {
         match body.read(&mut buf) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
             Ok(n) => received += n as u64,
+            Err(_) => return base(StatusCode::BAD_REQUEST, Instant::now()),
         }
     }
     // dur starts after the drain
@@ -63,14 +137,40 @@ pub fn up(req: Request) -> Response {
         .with_body(received.to_string())
 }
 
-pub fn meta(req: &Request, start: Instant) -> Response {
+// the wire name of the version, empty for one this build does not know
+pub fn protocol(req: &Request) -> &'static str {
+    match req.get_version() {
+        Version::HTTP_09 => "HTTP/0.9",
+        Version::HTTP_10 => "HTTP/1.0",
+        Version::HTTP_11 => "HTTP/1.1",
+        Version::HTTP_2 => "HTTP/2",
+        Version::HTTP_3 => "HTTP/3",
+        _ => "",
+    }
+}
+
+// the same scheme and authority with this path alone, join drops the query and fragment
+pub fn url_at(url: &Url, path: &str) -> String {
+    url.join(path).expect("an http url takes a path").into()
+}
+
+// what the edge knows about the request, the meta route and a publication both read it
+pub fn lookup_meta(req: &Request) -> howfastly::types::MetaResponse {
     let ip = req.get_client_ip_addr();
     let geo = ip.and_then(fastly::geo::geo_lookup);
+    let code = fastly::compute_runtime::pop();
+    let pop = pop_info(code).unwrap_or_else(|cause| {
+        eprintln!("pop lookup degraded to the bare code, {cause}");
+        howfastly::types::Pop {
+            code: code.to_string(),
+            ..Default::default()
+        }
+    });
 
-    let meta = howfastly::types::MetaResponse {
-        client_ip: ip.map(|ip| ip.to_string()).unwrap_or_default(),
+    howfastly::types::MetaResponse {
+        ip: ip.map(|ip| ip.to_string()).unwrap_or_default(),
         asn: geo.as_ref().map(|g| g.as_number()).unwrap_or_default(),
-        as_org: geo
+        org: geo
             .as_ref()
             .map(|g| howfastly::types::title_case(g.as_name()))
             .unwrap_or_default(),
@@ -82,22 +182,79 @@ pub fn meta(req: &Request, start: Instant) -> Response {
             .as_ref()
             .map(|g| g.country_code().to_string())
             .unwrap_or_default(),
-        pop: std::env::var("FASTLY_POP").unwrap_or_default(),
-        protocol: format!("{:?}", req.get_version())
-            .trim_end_matches(".0")
-            .to_string(),
-        service_version: std::env::var("FASTLY_SERVICE_VERSION").unwrap_or_default(),
-    };
+        // an unknown position reads as the null island
+        coordinates: geo
+            .as_ref()
+            .map(|g| howfastly::types::Coordinates {
+                latitude: g.latitude(),
+                longitude: g.longitude(),
+            })
+            .filter(|c| c.latitude != 0.0 || c.longitude != 0.0),
+        pop,
+        protocol: protocol(req).to_string(),
+        version: std::env::var("FASTLY_SERVICE_VERSION").unwrap_or_default(),
+        cargo: howfastly::VERSION.to_string(),
+        store: option_env!("HOWFASTLY_OUTPATH").map(str::to_string),
+    }
+}
 
+pub fn meta(req: &Request, start: Instant) -> Response {
     base(StatusCode::OK, start)
         .with_header(header::CONTENT_TYPE, "application/json")
-        .with_body(serde_json::to_string(&meta).unwrap_or_default())
+        .with_body(serde_json::to_string(&lookup_meta(req)).expect("meta serializes"))
 }
 
 pub fn not_found() -> Response {
     Response::from_status(StatusCode::NOT_FOUND)
 }
 
-pub fn method_not_allowed() -> Response {
-    Response::from_status(StatusCode::METHOD_NOT_ALLOWED)
+// the shell under a status, a visitor still lands in the app while a crawler reads the code
+pub fn page(status: StatusCode) -> Response {
+    match assets::shell() {
+        Some(html) => {
+            assets::headed(status, "text/html; charset=utf-8", "no-cache").with_body(html)
+        }
+        None => Response::from_status(status),
+    }
+}
+
+pub fn on_alias(req: &Request) -> bool {
+    req.get_url().host_str() == Some(ALIAS)
+}
+
+// the measurement and sharing endpoints answer on any hostname, a cli may point at the alias
+pub fn api(path: &str) -> bool {
+    matches!(
+        path,
+        "/ping" | "/down" | "/up" | "/meta" | "/start" | "/finish" | "/share"
+    ) || (path.starts_with("/share/") && path.ends_with(".json"))
+}
+
+// the same path and query on the canonical host, permanent so search engines move over
+pub fn canonical(req: &Request) -> Response {
+    let url = req.get_url();
+    let mut target = format!("https://{HOST}{}", url.path());
+    if let Some(query) = url.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    Response::from_status(StatusCode::PERMANENT_REDIRECT).with_header(header::LOCATION, target)
+}
+
+// crawlers stay off the transfer and reporting endpoints, one hit on down costs 100 MB of egress
+pub fn robots() -> Response {
+    assets::headed(StatusCode::OK, "text/plain; charset=utf-8", assets::DAY).with_body(format!(
+        "User-agent: *\nDisallow: /ping\nDisallow: /down\nDisallow: /up\nDisallow: /start\nDisallow: /finish\nDisallow: /meta\nDisallow: /cells\n\nSitemap: https://{HOST}/sitemap.xml\n"
+    ))
+}
+
+// the one page of the site
+pub fn sitemap() -> Response {
+    assets::headed(StatusCode::OK, "application/xml; charset=utf-8", assets::DAY).with_body(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n  <url>\n    <loc>https://{HOST}/</loc>\n  </url>\n</urlset>\n"
+    ))
+}
+
+pub fn method_not_allowed(allow: &'static str) -> Response {
+    Response::from_status(StatusCode::METHOD_NOT_ALLOWED).with_header(header::ALLOW, allow)
 }

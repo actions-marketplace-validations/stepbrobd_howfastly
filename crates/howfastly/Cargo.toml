@@ -1,12 +1,14 @@
 [package]
 name        = "howfastly"
-description = "measure your connection speed to the fastly network"
+description = "Measure your connection speed to the Fastly network"
 
-edition.workspace    = true
-license.workspace    = true
-readme.workspace     = true
-repository.workspace = true
-version.workspace    = true
+edition.workspace      = true
+homepage.workspace     = true
+license.workspace      = true
+readme.workspace       = true
+repository.workspace   = true
+rust-version.workspace = true
+version.workspace      = true
 
 categories = ["command-line-utilities", "network-programming"]
 keywords   = ["bandwidth", "fastly", "network", "speedtest"]
@@ -16,29 +18,23 @@ bin-dir = "{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 pkg-url = "{ repo }/releases/download/{ version }/{ name }-{ target }.tar.gz"
 
-[lib]
-name = "howfastly"
-path = "src/lib.rs"
-
 [[bin]]
 name              = "howfastly"
-path              = "src/main.rs"
 required-features = ["cli"]
 
 # the compute and web crates take the lib alone, and none of the cli
 # deps build for wasm32, so they stay optional and off for those
 [features]
 default = ["cli"]
-cli     = ["dep:anyhow", "dep:clap", "dep:reqwest", "dep:serde_json", "dep:tokio"]
+cli     = ["dep:anyhow", "dep:clap", "dep:reqwest", "dep:tokio"]
 
 [dependencies]
 anyhow     = { workspace = true, optional = true }
 clap       = { workspace = true, optional = true }
 reqwest    = { workspace = true, optional = true }
 serde      = { workspace = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 tokio      = { workspace = true, optional = true }
 
 [dev-dependencies]
-proptest.workspace   = true
-serde_json.workspace = true
+proptest.workspace = true

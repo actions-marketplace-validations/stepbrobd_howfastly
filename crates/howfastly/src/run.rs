@@ -1,43 +1,95 @@
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, ensure};
-use howfastly::http::parse_server_timing;
+use anyhow::{Context, Result, anyhow, ensure};
+use howfastly::http;
+use howfastly::share;
 use howfastly::stats;
 use howfastly::types::{
-    DirectionSummary, LOADED_PING_INTERVAL_MS, MetaResponse, SizePlan, SizeSamples,
-    SpeedtestResults, TestConfig, size_label, summarize_direction, summarize_latency,
+    Direction, DirectionSummary, LOADED_PING_INTERVAL_MS, MetaResponse, Outcome, Run, SizePlan,
+    SizeSamples, SpeedtestResults, Stage, TestConfig, parse_meta, size_label, summarize_direction,
+    summarize_latency,
 };
-use reqwest::{Client, ClientBuilder, Method, RequestBuilder, Response, Version};
+use reqwest::{Client, ClientBuilder, Method, RequestBuilder, Response, StatusCode, Version};
+use tokio::sync::mpsc;
 
-use crate::Args;
+pub struct Options {
+    pub base: String,
+    pub local: Option<IpAddr>,
+    pub forced: Option<Version>,
+    // one direction alone, or both in order
+    pub only: Option<Direction>,
+    pub verbose: bool,
+    // publish a summary through the same connection once the run succeeds
+    pub share: bool,
+    pub cfg: TestConfig,
+}
 
-pub async fn run(args: &Args) -> Result<SpeedtestResults> {
-    let base = args.url.trim_end_matches('/').to_string();
-    let (client, version) = connect(&base, args.local_addr(), args.http_version()).await?;
+pub async fn run(opts: &Options) -> Result<SpeedtestResults> {
+    let (client, pinned) = connect(&opts.base, opts.local, opts.forced).await?;
     let runner = Runner {
         client,
-        version,
-        base,
-        verbose: args.verbose,
+        pinned,
+        base: opts.base.clone(),
+        verbose: opts.verbose,
     };
-    let cfg = args.config();
 
-    let (meta, version) = runner.meta().await.context("Service unreachable")?;
+    let (meta, version) = runner.meta().await?;
+    if let Some(warning) = meta.mismatch() {
+        eprintln!("Warning: {warning}");
+    }
+    let pop = if meta.pop.name.is_empty() {
+        meta.pop.code.clone()
+    } else {
+        format!("{} {}", meta.pop.code, meta.pop.name)
+    };
     eprintln!(
-        "Server: POP {} ({version:?}) | Client: {} | AS{} {} | {}, {}",
-        meta.pop, meta.client_ip, meta.asn, meta.as_org, meta.city, meta.country,
+        "Server: POP {pop} ({version:?}) | Client: {} | AS{} {} | {}, {}",
+        meta.ip, meta.asn, meta.org, meta.city, meta.country,
     );
 
+    runner.start().await;
     let mut results = SpeedtestResults {
         meta: Some(meta),
         ..Default::default()
     };
+    let mut stage = Stage::Latency;
+    let outcome = measure(&runner, opts, &mut results, &mut stage).await;
+    let finished_at = SystemTime::now();
+    let run = Run {
+        outcome: match &outcome {
+            Ok(()) => Outcome::Completed,
+            Err(_) => Outcome::Failed { stage },
+        },
+        results,
+    };
+    runner.finish(&run).await;
+    outcome?;
 
+    // a failed publication warns and keeps the results
+    if opts.share {
+        match runner.share(&opts.cfg, &run.results, finished_at).await {
+            Ok(shared) => eprintln!(
+                "Shared: {}\nExpires: {}",
+                shared.url,
+                share::utc(shared.expires_at),
+            ),
+            Err(e) => eprintln!("Warning: sharing failed: {e:#}"),
+        }
+    }
+    Ok(run.results)
+}
+
+// the latency phase then each direction, stage follows along for the report
+// a direction fails only after every one of its sizes, so the stage is its last
+async fn measure(
+    runner: &Runner,
+    opts: &Options,
+    results: &mut SpeedtestResults,
+    stage: &mut Stage,
+) -> Result<()> {
     let mut pings = Vec::new();
-    for i in 0..cfg.latency_samples {
+    for i in 0..opts.cfg.latency_samples {
         match runner.ping().await {
             Ok(ms) => pings.push(ms),
             Err(e) => eprintln!("Warning: latency sample {i}: {e}"),
@@ -48,17 +100,36 @@ pub async fn run(args: &Args) -> Result<SpeedtestResults> {
     if let Some(l) = &results.latency {
         eprintln!(
             "Latency: Min {:.1} / Median {:.1} / Avg {:.1} / Jitter {:.1} ms",
-            l.min_ms, l.median_ms, l.avg_ms, l.jitter_ms,
+            l.min, l.median, l.avg, l.jitter,
         );
     }
 
-    if !args.upload_only {
-        results.download = Some(runner.direction(false, &cfg).await?);
+    let dirs: &[Direction] = match &opts.only {
+        Some(dir) => std::slice::from_ref(dir),
+        None => &Direction::ALL,
+    };
+    for &dir in dirs {
+        let last = opts
+            .cfg
+            .plans(dir)
+            .last()
+            .expect("the cap keeps the smallest size");
+        *stage = Stage::Transfer {
+            direction: dir,
+            bytes: last.bytes,
+        };
+        let summary = runner.direction(dir, &opts.cfg).await?;
+        results.record(dir, summary);
     }
-    if !args.download_only {
-        results.upload = Some(runner.direction(true, &cfg).await?);
+    Ok(())
+}
+
+// an unexplained status, such as a proxy page, speaks for itself
+fn share_error(status: StatusCode, body: &str) -> anyhow::Error {
+    match share::error_message(body) {
+        Some(msg) => anyhow!("{status}: {msg}"),
+        None => anyhow!("{status}"),
     }
-    Ok(results)
 }
 
 // a forced version either connects or fails the run
@@ -86,16 +157,28 @@ async fn connect(
         return Ok((client, pinned));
     }
 
-    if let Ok(client) = builder(Version::HTTP_3).local_address(local).build()
+    if !base.starts_with("http://")
+        && let Ok(client) = builder(Version::HTTP_3).local_address(local).build()
         && probe(&client, base, Some(Version::HTTP_3)).await.is_ok()
     {
         return Ok((client, Some(Version::HTTP_3)));
     }
-    Ok((Client::builder().local_address(local).build()?, None))
+    Ok((
+        Client::builder()
+            .user_agent(agent())
+            .local_address(local)
+            .build()?,
+        None,
+    ))
+}
+
+// the server tells cli runs apart from browsers by this string
+fn agent() -> String {
+    format!("HowFastly/{}", howfastly::VERSION)
 }
 
 fn builder(version: Version) -> ClientBuilder {
-    let b = Client::builder();
+    let b = Client::builder().user_agent(agent());
     if version == Version::HTTP_3 {
         b.http3_prior_knowledge()
     } else if version == Version::HTTP_2 {
@@ -122,32 +205,75 @@ async fn probe(client: &Client, base: &str, pinned: Option<Version>) -> reqwest:
 #[derive(Clone)]
 struct Runner {
     client: Client,
-    version: Option<Version>,
+    // h3 needs every request pinned, alpn settles the rest
+    pinned: Option<Version>,
     base: String,
     verbose: bool,
 }
 
 fn server_dur_ms(resp: &Response) -> f64 {
-    resp.headers()
-        .get("server-timing")
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_server_timing)
-        .unwrap_or(0.0)
+    http::server_dur_ms(
+        resp.headers()
+            .get("server-timing")
+            .and_then(|v| v.to_str().ok()),
+    )
 }
 
 impl Runner {
     fn req(&self, method: Method, path: &str) -> RequestBuilder {
         let req = self.client.request(method, format!("{}{path}", self.base));
-        match self.version {
+        match self.pinned {
             Some(v) => req.version(v),
             None => req,
         }
     }
 
     async fn meta(&self) -> Result<(MetaResponse, Version)> {
-        let resp = self.req(Method::GET, "/meta").send().await?;
+        let resp = self
+            .req(Method::GET, "/meta")
+            .send()
+            .await
+            .context("Service unreachable")?;
         let version = resp.version();
-        Ok((resp.error_for_status()?.json().await?, version))
+        let body = resp.error_for_status()?.text().await?;
+        Ok((parse_meta(&body)?, version))
+    }
+
+    // run markers for the edge side counting, the outcome is ignored
+    async fn start(&self) {
+        let _ = self.req(Method::POST, "/start").send().await;
+    }
+
+    async fn finish(&self, run: &Run) {
+        let _ = self.req(Method::POST, "/finish").json(run).send().await;
+    }
+
+    // summary only, the raw samples stay local
+    async fn share(
+        &self,
+        cfg: &TestConfig,
+        results: &SpeedtestResults,
+        finished_at: SystemTime,
+    ) -> Result<share::ShareResponse> {
+        let finished_at = finished_at
+            .duration_since(UNIX_EPOCH)
+            .context("System clock before the UNIX epoch")?
+            .as_secs();
+        let payload =
+            share::Payload::from_results(share::Client::Cli, finished_at, cfg.clone(), results);
+        let resp = self
+            .req(Method::POST, "/share")
+            .json(&payload)
+            .send()
+            .await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        match status {
+            StatusCode::OK | StatusCode::CREATED => {
+                serde_json::from_str(&body).context("Invalid share response")
+            }
+            _ => Err(share_error(status, &body)),
+        }
     }
 
     async fn ping(&self) -> Result<f64> {
@@ -185,49 +311,51 @@ impl Runner {
         Ok(stats::mbps(bytes, secs))
     }
 
-    async fn sample(&self, upload: bool, bytes: u64) -> Result<f64> {
-        if upload {
-            self.upload(bytes).await
-        } else {
-            self.download(bytes).await
+    async fn sample(&self, dir: Direction, bytes: u64) -> Result<f64> {
+        match dir {
+            Direction::Download => self.download(bytes).await,
+            Direction::Upload => self.upload(bytes).await,
         }
     }
 
-    async fn direction(&self, upload: bool, cfg: &TestConfig) -> Result<DirectionSummary> {
-        let name = if upload { "Upload" } else { "Download" };
-        let stop = Arc::new(AtomicBool::new(false));
-        let loaded = Arc::new(Mutex::new(Vec::new()));
+    async fn direction(&self, dir: Direction, cfg: &TestConfig) -> Result<DirectionSummary> {
+        let name = dir.name();
 
+        // the pinger sends every sample over a channel until it is aborted
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let pinger = tokio::spawn({
             let runner = self.clone();
-            let stop = stop.clone();
-            let loaded = loaded.clone();
             async move {
-                while !stop.load(Ordering::Relaxed) {
-                    if let Ok(ms) = runner.ping().await {
-                        loaded.lock().unwrap().push(ms);
+                loop {
+                    if let Ok(ms) = runner.ping().await
+                        && tx.send(ms).is_err()
+                    {
+                        return;
                     }
-                    tokio::time::sleep(Duration::from_millis(LOADED_PING_INTERVAL_MS)).await;
+                    tokio::time::sleep(Duration::from_millis(u64::from(LOADED_PING_INTERVAL_MS)))
+                        .await;
                 }
             }
         });
 
-        let phase_start = Instant::now();
-        let plans = if upload { &cfg.upload } else { &cfg.download };
+        // the budget counts completed transfers only, as the web does
+        let mut active = Duration::ZERO;
         let mut out = Vec::new();
-        for &SizePlan { bytes, iterations } in plans {
+        for &SizePlan { bytes, iterations } in cfg.plans(dir) {
             let mut s = SizeSamples {
                 bytes,
                 mbps: Vec::new(),
                 skipped: false,
             };
             for i in 0..iterations {
-                if phase_start.elapsed().as_secs_f64() > cfg.time_budget_secs {
+                if active.as_secs_f64() > cfg.time_budget_secs {
                     s.skipped = true;
                     break;
                 }
-                match self.sample(upload, bytes).await {
+                let start = Instant::now();
+                match self.sample(dir, bytes).await {
                     Ok(mbps) => {
+                        active += start.elapsed();
                         if self.verbose {
                             eprintln!("{name} {} sample {i}: {mbps:.2} Mbps", size_label(bytes));
                         }
@@ -248,9 +376,11 @@ impl Runner {
             out.push(s);
         }
 
-        stop.store(true, Ordering::Relaxed);
-        let _ = pinger.await;
-        let loaded_ms = loaded.lock().unwrap().clone();
+        pinger.abort();
+        let mut loaded_ms = Vec::new();
+        while let Ok(ms) = rx.try_recv() {
+            loaded_ms.push(ms);
+        }
 
         ensure!(
             out.iter().any(|s| !s.mbps.is_empty()),

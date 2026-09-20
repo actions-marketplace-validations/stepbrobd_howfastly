@@ -19,9 +19,43 @@ pub const UPLOAD_PLAN: [SizePlan; 5] = [
 ];
 pub const LATENCY_SAMPLES: usize = 25;
 pub const TIME_BUDGET_SECS: f64 = 30.0;
-pub const LOADED_PING_INTERVAL_MS: u64 = 400;
+pub const LOADED_PING_INTERVAL_MS: u32 = 400;
 
-#[derive(Clone, Copy, Debug)]
+// bytes a run moves when no size is skipped
+pub fn planned_bytes() -> u64 {
+    DOWNLOAD_PLAN
+        .iter()
+        .chain(&UPLOAD_PLAN)
+        .map(|p| p.bytes * p.iterations as u64)
+        .sum()
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    Download,
+    Upload,
+}
+
+impl Direction {
+    pub const ALL: [Direction; 2] = [Direction::Download, Direction::Upload];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Download => "Download",
+            Self::Upload => "Upload",
+        }
+    }
+
+    pub fn plan(self) -> &'static [SizePlan] {
+        match self {
+            Self::Download => &DOWNLOAD_PLAN,
+            Self::Upload => &UPLOAD_PLAN,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct SizePlan {
     pub bytes: u64,
     pub iterations: usize,
@@ -33,25 +67,105 @@ impl SizePlan {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct MetaResponse {
-    pub client_ip: String,
-    pub asn: u32,
-    pub as_org: String,
-    pub city: String,
-    pub country: String,
-    pub pop: String,
-    #[serde(default)]
-    pub protocol: String,
-    pub service_version: String,
+// wgs 84 degrees, the shape of the datacenters api coordinates object
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct Coordinates {
+    pub latitude: f64,
+    pub longitude: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct MetaResponse {
+    pub ip: String,
+    pub asn: u32,
+    pub org: String,
+    pub city: String,
+    pub country: String,
+    pub coordinates: Option<Coordinates>,
+    pub pop: Pop,
+    pub protocol: String,
+    pub version: String,
+    pub cargo: String,
+    // the nix store path of the serving build, absent outside nix
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+}
+
+impl MetaResponse {
+    // a differing build that still decodes is a warning, not a failure
+    pub fn mismatch(&self) -> Option<MetaError> {
+        (self.cargo != crate::VERSION).then(|| MetaError::Mismatch(self.cargo.clone()))
+    }
+}
+
+#[derive(Debug)]
+pub enum MetaError {
+    Mismatch(String),
+    Missing,
+    Invalid(serde_json::Error),
+}
+
+impl std::fmt::Display for MetaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let build = crate::VERSION;
+        match self {
+            Self::Mismatch(server) => {
+                write!(
+                    f,
+                    "Server runs HowFastly {server} but this build is {build}"
+                )
+            }
+            Self::Missing => write!(
+                f,
+                "Server predates version reporting, this build is {build}"
+            ),
+            Self::Invalid(e) => write!(f, "Invalid meta response: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for MetaError {}
+
+// a shape mismatch names the server version so an old build knows to upgrade
+pub fn parse_meta(body: &str) -> Result<MetaResponse, MetaError> {
+    let err = match serde_json::from_str(body) {
+        Ok(meta) => return Ok(meta),
+        Err(e) => e,
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Err(MetaError::Invalid(err));
+    };
+    Err(match value.get("cargo").and_then(|c| c.as_str()) {
+        Some(server) if server != crate::VERSION => MetaError::Mismatch(server.to_string()),
+        Some(_) => MetaError::Invalid(err),
+        None => MetaError::Missing,
+    })
+}
+
+// also one entry of the fastly datacenters api response
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Pop {
+    pub code: String,
+    pub name: String,
+    pub group: String,
+    pub coordinates: Option<Coordinates>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TestConfig {
     pub latency_samples: usize,
     pub download: Vec<SizePlan>,
     pub upload: Vec<SizePlan>,
     pub time_budget_secs: f64,
+}
+
+impl TestConfig {
+    pub fn plans(&self, dir: Direction) -> &[SizePlan] {
+        match dir {
+            Direction::Download => &self.download,
+            Direction::Upload => &self.upload,
+        }
+    }
 }
 
 impl Default for TestConfig {
@@ -65,7 +179,7 @@ impl Default for TestConfig {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SizeSamples {
     pub bytes: u64,
     pub mbps: Vec<f64>,
@@ -74,25 +188,71 @@ pub struct SizeSamples {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct LatencySummary {
-    pub min_ms: f64,
-    pub avg_ms: f64,
-    pub median_ms: f64,
-    pub jitter_ms: f64,
+    pub min: f64,
+    pub avg: f64,
+    pub median: f64,
+    pub jitter: f64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SizeSummary {
     pub bytes: u64,
     pub samples: usize,
-    pub median_mbps: Option<f64>,
+    pub median: Option<f64>,
     pub skipped: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DirectionSummary {
-    pub p90_mbps: Option<f64>,
+    pub p90: Option<f64>,
     pub sizes: Vec<SizeSummary>,
-    pub loaded_latency: Option<LatencySummary>,
+    pub loaded: Option<LatencySummary>,
+}
+
+// where a run stood, the latency phase or one size class of one direction
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase", tag = "phase")]
+pub enum Stage {
+    Latency,
+    Transfer { direction: Direction, bytes: u64 },
+}
+
+impl Stage {
+    pub fn label(self) -> String {
+        match self {
+            Self::Latency => "Latency".into(),
+            Self::Transfer { direction, bytes } => {
+                format!("{} {}", direction.name(), size_label(bytes))
+            }
+        }
+    }
+}
+
+// how a run ended, one that did not complete says where it stood
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase", tag = "outcome")]
+pub enum Outcome {
+    Completed,
+    Canceled { stage: Stage },
+    Failed { stage: Stage },
+    Left { stage: Stage },
+}
+
+impl Outcome {
+    pub fn stage(self) -> Option<Stage> {
+        match self {
+            Self::Completed => None,
+            Self::Canceled { stage } | Self::Failed { stage } | Self::Left { stage } => Some(stage),
+        }
+    }
+}
+
+// what a client posts when a run ends, the results it has under the outcome
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Run {
+    #[serde(flatten)]
+    pub outcome: Outcome,
+    pub results: SpeedtestResults,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -101,6 +261,22 @@ pub struct SpeedtestResults {
     pub latency: Option<LatencySummary>,
     pub download: Option<DirectionSummary>,
     pub upload: Option<DirectionSummary>,
+}
+
+impl SpeedtestResults {
+    pub fn direction(&self, dir: Direction) -> Option<&DirectionSummary> {
+        match dir {
+            Direction::Download => self.download.as_ref(),
+            Direction::Upload => self.upload.as_ref(),
+        }
+    }
+
+    pub fn record(&mut self, dir: Direction, summary: DirectionSummary) {
+        match dir {
+            Direction::Download => self.download = Some(summary),
+            Direction::Upload => self.upload = Some(summary),
+        }
+    }
 }
 
 // fastly geo data arrives lowercased
@@ -128,44 +304,179 @@ pub fn size_label(bytes: u64) -> String {
 }
 
 pub fn summarize_latency(samples_ms: &[f64]) -> Option<LatencySummary> {
-    let median_ms = stats::median(samples_ms)?;
+    let median = stats::median(samples_ms)?;
     Some(LatencySummary {
-        min_ms: samples_ms.iter().copied().fold(f64::INFINITY, f64::min),
-        avg_ms: samples_ms.iter().sum::<f64>() / samples_ms.len() as f64,
-        median_ms,
-        jitter_ms: stats::jitter(samples_ms).unwrap_or(0.0),
+        min: samples_ms.iter().copied().fold(f64::INFINITY, f64::min),
+        avg: samples_ms.iter().sum::<f64>() / samples_ms.len() as f64,
+        median,
+        jitter: stats::jitter(samples_ms).unwrap_or(0.0),
     })
 }
 
 pub fn summarize_direction(sizes: &[SizeSamples], loaded_ms: &[f64]) -> DirectionSummary {
     let all: Vec<f64> = sizes.iter().flat_map(|s| s.mbps.iter().copied()).collect();
     DirectionSummary {
-        p90_mbps: stats::percentile(&all, 90.0),
+        p90: stats::percentile(&all, 90.0),
         sizes: sizes
             .iter()
             .map(|s| SizeSummary {
                 bytes: s.bytes,
                 samples: s.mbps.len(),
-                median_mbps: stats::median(&s.mbps),
+                median: stats::median(&s.mbps),
                 skipped: s.skipped,
             })
             .collect(),
-        loaded_latency: summarize_latency(loaded_ms),
+        loaded: summarize_latency(loaded_ms),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    // serde_json parses floats best effort, a nanodegree is well under a millimeter
+    fn close(a: Option<Coordinates>, b: Option<Coordinates>) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                (a.latitude - b.latitude).abs() < 1e-9 && (a.longitude - b.longitude).abs() < 1e-9
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn title_case_keeps_length_and_settles(s in "[a-z .-]{0,20}") {
+            let once = title_case(&s);
+            prop_assert_eq!(once.chars().count(), s.chars().count());
+            prop_assert_eq!(title_case(&once), once.clone());
+            prop_assert_eq!(once.to_lowercase(), s);
+        }
+
+        #[test]
+        fn latency_summary_orders(samples in prop::collection::vec(0.0f64..1e4, 1..50)) {
+            let s = summarize_latency(&samples).unwrap();
+            let max = samples.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            prop_assert!(s.min <= s.median && s.median <= max);
+            prop_assert!(s.min <= s.avg && s.avg <= max + 1e-9);
+            prop_assert!(s.jitter >= 0.0);
+        }
+
+        #[test]
+        fn direction_summary_keeps_shape(
+            sizes in prop::collection::vec(
+                (1u64..1_000_000, prop::collection::vec(0.0f64..1e4, 0..8), any::<bool>()),
+                0..6,
+            ),
+            loaded in prop::collection::vec(0.0f64..1e4, 0..20),
+        ) {
+            let samples: Vec<SizeSamples> = sizes
+                .iter()
+                .map(|(bytes, mbps, skipped)| SizeSamples {
+                    bytes: *bytes,
+                    mbps: mbps.clone(),
+                    skipped: *skipped,
+                })
+                .collect();
+            let d = summarize_direction(&samples, &loaded);
+            prop_assert_eq!(d.sizes.len(), samples.len());
+            prop_assert_eq!(d.loaded.is_some(), !loaded.is_empty());
+            let all: Vec<f64> = samples.iter().flat_map(|s| s.mbps.iter().copied()).collect();
+            match d.p90 {
+                Some(p) => {
+                    let lo = all.iter().copied().fold(f64::INFINITY, f64::min);
+                    let hi = all.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    prop_assert!(lo <= p && p <= hi);
+                }
+                None => prop_assert!(all.is_empty()),
+            }
+            for (s, out) in samples.iter().zip(&d.sizes) {
+                prop_assert_eq!(out.bytes, s.bytes);
+                prop_assert_eq!(out.samples, s.mbps.len());
+                prop_assert_eq!(out.skipped, s.skipped);
+                prop_assert_eq!(out.median.is_some(), !s.mbps.is_empty());
+            }
+        }
+
+        #[test]
+        fn meta_roundtrips(
+            ip in "[0-9a-f:.]{1,40}",
+            asn in any::<u32>(),
+            city in "[A-Za-z ]{0,20}",
+            lat in -90.0f64..90.0,
+            lon in -180.0f64..180.0,
+            code in "[A-Z]{3}",
+        ) {
+            let meta = MetaResponse {
+                ip,
+                asn,
+                city,
+                coordinates: Some(Coordinates { latitude: lat, longitude: lon }),
+                pop: Pop {
+                    code,
+                    coordinates: Some(Coordinates { latitude: -lat, longitude: -lon }),
+                    ..Default::default()
+                },
+                cargo: crate::VERSION.to_string(),
+                ..Default::default()
+            };
+            let back = parse_meta(&serde_json::to_string(&meta).unwrap()).unwrap();
+            prop_assert!(back.mismatch().is_none());
+            prop_assert_eq!(back.ip, meta.ip);
+            prop_assert_eq!(back.asn, meta.asn);
+            prop_assert_eq!(back.city, meta.city);
+            prop_assert!(close(back.coordinates, meta.coordinates));
+            prop_assert_eq!(back.pop.code, meta.pop.code);
+            prop_assert!(close(back.pop.coordinates, meta.pop.coordinates));
+        }
+    }
+
+    #[test]
+    fn meta_fallback() {
+        let ok = serde_json::to_string(&MetaResponse {
+            cargo: crate::VERSION.to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(parse_meta(&ok).unwrap().mismatch().is_none());
+        assert!(matches!(
+            parse_meta(r#"{"cargo":"0.0.0","pop":"BRU"}"#),
+            Err(MetaError::Mismatch(v)) if v == "0.0.0"
+        ));
+        assert!(matches!(
+            parse_meta(r#"{"pop":"BRU"}"#),
+            Err(MetaError::Missing)
+        ));
+        assert!(matches!(parse_meta("nope"), Err(MetaError::Invalid(_))));
+    }
+
+    #[test]
+    fn pop_from_datacenters_entry() {
+        let entry = r#"{"code":"BRU","name":"Brussels","group":"Europe","region":"EU-Central",
+            "coordinates":{"x":0,"y":0,"latitude":50.871,"longitude":4.476},"shield":"bru-brussels-be"}"#;
+        let pop: Pop = serde_json::from_str(entry).unwrap();
+        assert_eq!(pop.code, "BRU");
+        assert_eq!(
+            pop.coordinates,
+            Some(Coordinates {
+                latitude: 50.871,
+                longitude: 4.476
+            })
+        );
+        let bare: Pop = serde_json::from_str(r#"{"code":"XXX","name":"","group":""}"#).unwrap();
+        assert_eq!(bare.coordinates, None);
+    }
 
     #[test]
     fn latency_summary() {
         assert!(summarize_latency(&[]).is_none());
         let s = summarize_latency(&[2.0, 4.0, 3.0]).unwrap();
-        assert_eq!(s.min_ms, 2.0);
-        assert_eq!(s.avg_ms, 3.0);
-        assert_eq!(s.median_ms, 3.0);
-        assert_eq!(s.jitter_ms, 1.5);
+        assert_eq!(s.min, 2.0);
+        assert_eq!(s.avg, 3.0);
+        assert_eq!(s.median, 3.0);
+        assert_eq!(s.jitter, 1.5);
     }
 
     #[test]
@@ -183,11 +494,12 @@ mod tests {
             },
         ];
         let d = summarize_direction(&sizes, &[]);
-        assert!(d.p90_mbps.unwrap() > 10.0);
+        // the 90th percentile of 10 and 20 interpolates to 19
+        assert!((d.p90.unwrap() - 19.0).abs() < 1e-9);
         assert_eq!(d.sizes.len(), 2);
-        assert_eq!(d.sizes[0].median_mbps, Some(15.0));
+        assert_eq!(d.sizes[0].median, Some(15.0));
         assert!(d.sizes[1].skipped);
-        assert!(d.loaded_latency.is_none());
+        assert!(d.loaded.is_none());
     }
 
     #[test]
@@ -200,10 +512,58 @@ mod tests {
     }
 
     #[test]
+    fn planned_total() {
+        assert_eq!(planned_bytes(), 637_600_000);
+    }
+
+    #[test]
     fn size_labels() {
         assert_eq!(size_label(100_000), "100 kB");
         assert_eq!(size_label(1_000_000), "1 MB");
         assert_eq!(size_label(25_000_000), "25 MB");
+    }
+
+    #[test]
+    fn directions() {
+        assert_eq!(Direction::Download.plan()[0].bytes, DOWNLOAD_PLAN[0].bytes);
+        assert_eq!(Direction::Upload.plan().len(), UPLOAD_PLAN.len());
+        let cfg = TestConfig::default();
+        assert_eq!(cfg.plans(Direction::Upload).len(), cfg.upload.len());
+        let mut r = SpeedtestResults::default();
+        assert!(r.direction(Direction::Upload).is_none());
+        r.record(Direction::Upload, summarize_direction(&[], &[]));
+        assert!(r.direction(Direction::Upload).is_some());
+        assert!(r.direction(Direction::Download).is_none());
+        assert_eq!(Direction::ALL.map(Direction::name), ["Download", "Upload"]);
+    }
+
+    #[test]
+    fn run_names_its_outcome_and_stage() {
+        let run = Run {
+            outcome: Outcome::Left {
+                stage: Stage::Transfer {
+                    direction: Direction::Upload,
+                    bytes: 1_000_000,
+                },
+            },
+            results: SpeedtestResults::default(),
+        };
+        let json = serde_json::to_string(&run).unwrap();
+        assert!(json.starts_with(
+            r#"{"outcome":"left","stage":{"phase":"transfer","direction":"upload","bytes":1000000},"results":"#
+        ));
+        let back: Run = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.outcome, run.outcome);
+        assert_eq!(back.outcome.stage().unwrap().label(), "Upload 1 MB");
+        let done = Run {
+            outcome: Outcome::Completed,
+            results: SpeedtestResults::default(),
+        };
+        let json = serde_json::to_string(&done).unwrap();
+        assert!(json.starts_with(r#"{"outcome":"completed","results":"#));
+        let back: Run = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.outcome, Outcome::Completed);
+        assert_eq!(Stage::Latency.label(), "Latency");
     }
 
     #[test]
@@ -216,7 +576,7 @@ mod tests {
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: SpeedtestResults = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.latency.unwrap().min_ms, 1.0);
+        assert_eq!(back.latency.unwrap().min, 1.0);
         assert!(back.upload.is_none());
     }
 }

@@ -1,202 +1,139 @@
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-
-use gloo_timers::future::TimeoutFuture;
-use howfastly::chart::{format_speed, svg_path, throughput_points};
+use howfastly::share::{Client, Report, SharedDirection};
 use howfastly::stats;
 use howfastly::types::{
-    DOWNLOAD_PLAN, DirectionSummary, LOADED_PING_INTERVAL_MS, LatencySummary, MetaResponse,
-    SizePlan, SizeSamples, TestConfig, UPLOAD_PLAN, size_label, summarize_direction,
-    summarize_latency,
+    Direction, LatencySummary, MetaResponse, SizePlan, SizeSummary, Stage, planned_bytes,
+    size_label,
 };
+use howfastly_map::chart::{chart_y, format_speed, peak, svg_path};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use wasm_bindgen::JsValue;
 
 use crate::engine;
+use crate::map::Map;
+use crate::run::{self, Lane, Phase, State};
+use crate::share::{self, Clip, Share};
+use crate::tips;
 
-const WINDOW_MS: f64 = 500.0;
-const EMIT_MS: f64 = 100.0;
-
-#[derive(Clone, Copy)]
-struct Direction {
-    upload: bool,
-    running: RwSignal<bool>,
-    points: RwSignal<Vec<(f64, f64)>>,
-    sizes: RwSignal<Vec<SizeSamples>>,
-    summary: RwSignal<Option<DirectionSummary>>,
-}
-
-impl Direction {
-    fn new(upload: bool) -> Self {
-        Self {
-            upload,
-            running: RwSignal::new(false),
-            points: RwSignal::new(Vec::new()),
-            sizes: RwSignal::new(Vec::new()),
-            summary: RwSignal::new(None),
-        }
-    }
-
-    fn reset(self) {
-        self.running.set(false);
-        self.points.set(Vec::new());
-        self.sizes.set(Vec::new());
-        self.summary.set(None);
-    }
-}
-
-#[derive(Clone, Copy)]
-struct State {
-    running: RwSignal<bool>,
-    error: RwSignal<Option<String>>,
-    latency: RwSignal<Option<LatencySummary>>,
-    down: Direction,
-    up: Direction,
-}
+// the ci pushes every build here, the footer points at the served one
+const CACHE: &str = "https://cache.ysun.co";
 
 #[component]
 pub fn App() -> impl IntoView {
-    let meta = RwSignal::new(None::<MetaResponse>);
     let state = State {
-        running: RwSignal::new(false),
+        phase: RwSignal::new(Phase::Idle),
+        abort: StoredValue::new_local(None),
         error: RwSignal::new(None),
+        notice: RwSignal::new(None),
+        meta: RwSignal::new(None),
         latency: RwSignal::new(None),
-        down: Direction::new(false),
-        up: Direction::new(true),
+        down: Lane::new(Direction::Download),
+        up: Lane::new(Direction::Upload),
+        stage: StoredValue::new(Stage::Latency),
+        snapshot: RwSignal::new_local(None),
+        share: RwSignal::new(Share::Ready),
+        reported: StoredValue::new(false),
     };
+    window_event_listener(leptos::ev::pagehide, move |_| run::leave(state));
 
     spawn_local(async move {
-        if let Ok(m) = engine::meta().await {
-            meta.set(Some(m));
+        match engine::meta().await {
+            Ok(m) => {
+                state
+                    .notice
+                    .set(m.mismatch().map(|w| format!("{w}, reload to update.")));
+                state.meta.set(Some(m));
+            }
+            Err(e) => state.notice.set(Some(engine::describe(e))),
         }
     });
 
-    let launch = move || {
-        state.running.set(true);
-        spawn_local(async move {
-            if let Err(e) = run_all(state).await {
-                state.error.set(Some(format!("{e:?}")));
-            }
-            state.down.running.set(false);
-            state.up.running.set(false);
-            state.running.set(false);
-        });
-    };
-
+    // the plan total to the nearest ten megabytes
+    let total = format!("~{} MB", (planned_bytes() as f64 / 1e7).round() * 10.0);
     // first visit gates behind the popup, later visits start right away
     let gate = RwSignal::new(!engine::autostart_saved());
     if !gate.get_untracked() {
-        launch();
+        run::launch(state);
     }
     let begin = move |_| {
         engine::save_autostart();
         gate.set(false);
-        launch();
+        run::launch(state);
     };
 
     view! {
         <main class="mx-auto flex min-h-screen w-full max-w-[65ch] flex-col gap-8 p-4 lg:max-w-6xl">
-            <section class="overflow-x-auto rounded bg-nord-1 p-4">
-                <div class="mx-auto w-max whitespace-nowrap font-mono">
-                    {move || match meta.get() {
-                        Some(m) => view! {
-                            <a href=format!("https://bgp.tools/prefix/{}", m.client_ip)
-                                target="_blank" rel="noopener">{m.client_ip.clone()}</a>
-                            " ("
-                            <a href=format!("https://bgp.tools/as/{}", m.asn)
-                                target="_blank" rel="noopener">{format!("AS{}", m.asn)}</a>
-                            ") @ "
-                            {format!("{}, {}", m.city, m.country)}
-                            " "
-                            <svg
-                                class="inline h-[1lh] w-[1em] align-bottom"
-                                viewBox="0 0 16 16"
-                                fill="none"
-                                stroke="currentColor"
-                                stroke-width="1.5"
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                            >
-                                <path d="M2.5 8h11M9.5 4l4 4-4 4"/>
-                            </svg>
-                            " "
-                            <a href=format!("https://www.fastly.com/documentation/guides/getting-started/concepts/using-fastlys-global-pop-network/#complete-list-of-pops:~:text={}", m.pop)
-                                target="_blank" rel="noopener">{m.pop.clone()}</a>
-                            {(!m.protocol.is_empty()).then(|| format!(" via {}", m.protocol))}
-                        }
-                            .into_any(),
-                        None => view! { "-" }.into_any(),
-                    }}
-                </div>
-            </section>
-
-            <div class="grid gap-8 lg:grid-cols-2">
-                <section class="flex flex-col gap-4">
-                    <Headline label="Download" dir=state.down state=state/>
-                    <SizeTable title="Download" dir=state.down/>
-                </section>
-                <section class="flex flex-col gap-4">
-                    <Headline label="Upload" dir=state.up state=state/>
-                    <SizeTable title="Upload" dir=state.up/>
-                </section>
-            </div>
+            <RouteBar meta=state.meta.into() tip=tips::ROUTE/>
 
             <section class="rounded bg-nord-1 p-4">
-                <h2 class="font-semibold">Latency</h2>
-                <div class="mt-2 grid gap-4 sm:grid-cols-3">
-                    <LatencyCard label="Unloaded" summary=state.latency.into()/>
-                    <LatencyCard
-                        label="Download loaded"
-                        summary=Signal::derive(move || {
-                            state.down.summary.get().and_then(|d| d.loaded_latency)
-                        })
-                    />
-                    <LatencyCard
-                        label="Upload loaded"
-                        summary=Signal::derive(move || {
-                            state.up.summary.get().and_then(|d| d.loaded_latency)
-                        })
-                    />
-                </div>
+                // the map fetches its detail only once the latency probes are done
+                <Map
+                    meta=state.meta.into()
+                    active=Signal::derive(move || !gate.get())
+                    quiet=Signal::derive(move || {
+                        state.phase.get() == Phase::Idle || state.latency.get().is_some()
+                    })
+                >
+                    <Controls state=state/>
+                </Map>
             </section>
+
+            // the link of the completed run, or why there is none
+            {move || match state.share.get() {
+                Share::Published { url, expires_at, clip } => {
+                    let href = url.clone();
+                    let note = match clip {
+                        Clip::Pending => "",
+                        Clip::Copied => "Copied to the clipboard.",
+                        Clip::Failed => "Copy failed, select the link or press Share again.",
+                    };
+                    let until = format!("Valid until {}.", engine::local_time(expires_at));
+                    Some(view! {
+                        <div class="rounded border border-nord-8 bg-nord-1 p-4">
+                            <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                                <a class="font-mono [overflow-wrap:anywhere]" href=href>{url}</a>
+                                <small class="text-nord-4">{note}</small>
+                            </div>
+                            <div class="text-nord-4"><small>{until}</small></div>
+                        </div>
+                    }
+                        .into_any())
+                }
+                Share::Failed(e) => Some(view! {
+                    <div class="rounded border border-nord-11 bg-nord-1 p-4 text-nord-11">
+                        {format!("Sharing failed. {e}")}
+                    </div>
+                }
+                    .into_any()),
+                Share::Ready | Share::Publishing => None,
+            }}
+
+            {move || state.notice.get().map(|n| view! {
+                <div class="rounded border border-nord-13 bg-nord-1 p-4 text-nord-13">{n}</div>
+            })}
+
+            <div class="grid gap-8 lg:grid-cols-2">
+                <Throughput lane=state.down plans=Direction::Download.plan().to_vec()/>
+                <Throughput lane=state.up plans=Direction::Upload.plan().to_vec()/>
+            </div>
+
+            <Latency unloaded=state.latency.into() down=state.down up=state.up/>
 
             {move || state.error.get().map(|e| view! {
                 <div class="rounded border border-nord-11 bg-nord-1 p-4 text-nord-11">{e}</div>
             })}
 
-            <footer class="text-center">
-                <p><small>
-                    "Not an official Fastly product. Made by "
-                    <a href="https://ysun.co" target="_blank" rel="noopener">"Yifei Sun"</a>
-                    " aka "
-                    <a href="https://github.com/stepbrobd" target="_blank" rel="noopener">"StepBroBD"</a>
-                    ", source on "
-                    <a href="https://github.com/stepbrobd/howfastly" target="_blank" rel="noopener">"GitHub"</a>
-                    "."
-                </small></p>
-                <p><small>
-                    <a
-                        href=concat!(
-                            "https://github.com/stepbrobd/howfastly/releases/tag/",
-                            env!("CARGO_PKG_VERSION"),
-                        )
-                        target="_blank"
-                        rel="noopener"
-                    >
-                        {concat!("HowFastly ", env!("CARGO_PKG_VERSION"))}
-                    </a>
-                </small></p>
-            </footer>
+            // the build that served the page, checkable against the cache
+            {move || state.meta.get().and_then(|m| m.store).map(|path| view! { <StorePath path=path/> })}
+
+            <Footer/>
 
             {move || gate.get().then(|| view! {
                 <div class="fixed inset-0 z-10 flex items-center justify-center bg-nord-0/80 p-4">
                     <div class="w-full max-w-md rounded bg-nord-1 p-6">
                         <h2 class="text-lg font-semibold">HowFastly</h2>
                         <p class="mt-2">
-                            "Tests run automatically and transfer up to ~640 MB in total. "
-                            "Close the page early to spend less. "
-                            "Tap a speed card to run that test again."
+                            {format!("Tests run automatically and transfer up to {total} in total. ")}
+                            "Pause or cancel at any time, retest once it is done."
                         </p>
                         <button
                             class="mt-4 w-full cursor-pointer rounded bg-nord-10 px-8 py-3 text-nord-6 hover:bg-nord-9"
@@ -211,34 +148,312 @@ pub fn App() -> impl IntoView {
     }
 }
 
-const CHART_W: f64 = 300.0;
-const CHART_H: f64 = 80.0;
-
+// the read-only page of a published result, nothing here measures or reports
+// a result that cannot be shown sends the visitor home
 #[component]
-fn Waiting(class: &'static str) -> impl IntoView {
+pub fn Shared(id: String) -> impl IntoView {
+    let loaded = RwSignal::new(None::<Report>);
+    spawn_local(async move {
+        match share::load(id).await {
+            Some(report) => loaded.set(Some(report)),
+            None => engine::go_home(),
+        }
+    });
     view! {
-        <div class=format!("flex items-center justify-center rounded text-nord-3 {class}")>
-            <small>"Waiting for measurements..."</small>
-        </div>
+        <main class="mx-auto flex min-h-screen w-full max-w-[65ch] flex-col gap-8 p-4 lg:max-w-6xl">
+            {move || match loaded.get() {
+                None => view! {
+                    <section class="rounded bg-nord-1 p-4 text-nord-4">"Loading the shared result..."</section>
+                }
+                    .into_any(),
+                Some(report) => view! { <Viewer report=report/> }.into_any(),
+            }}
+            <Footer/>
+        </main>
+    }
+}
+
+// a lane filled from a stored direction, the presentation reads it like a finished run
+fn stored(dir: Direction, shared: Option<&SharedDirection>) -> Lane {
+    let lane = Lane::new(dir);
+    if let Some(d) = shared {
+        lane.summary.set(Some(d.summary.clone()));
+        if let Some(s) = &d.samples {
+            lane.sizes.set(s.clone());
+        }
+        if let Some(t) = &d.timeline {
+            lane.points.set(t.points());
+        }
+    }
+    lane
+}
+
+// what the chart says in place of a timeline
+fn absent(shared: Option<&SharedDirection>) -> &'static str {
+    match shared {
+        None => "Not measured",
+        Some(_) => "No timeline in this share",
     }
 }
 
 #[component]
-fn SpeedChart(dir: Direction) -> impl IntoView {
-    let (stroke, fill) = if dir.upload {
-        ("stroke-nord-12", "fill-nord-12")
-    } else {
-        ("stroke-nord-8", "fill-nord-8")
+fn Viewer(report: Report) -> impl IntoView {
+    let payload = report.payload;
+    let publication = report.publication;
+    let (published_at, expires_at) = (report.published_at, report.expires_at);
+    let meta = publication.to_meta();
+    let down = stored(Direction::Download, payload.download.as_ref());
+    let up = stored(Direction::Upload, payload.upload.as_ref());
+    let down_empty = absent(payload.download.as_ref());
+    let up_empty = absent(payload.upload.as_ref());
+    let down_plans = payload.config.plans(Direction::Download).to_vec();
+    let up_plans = payload.config.plans(Direction::Upload).to_vec();
+    let latency: Signal<Option<LatencySummary>> = RwSignal::new(payload.latency.clone()).into();
+
+    let client = match payload.client {
+        Client::Web => "in the browser",
+        Client::Cli => "from the command line",
     };
+    let measured = format!(
+        "{} with HowFastly {} {client}",
+        engine::local_time(payload.finished_at),
+        payload.build
+    );
+    // the publication context, what fastly saw of the request that published
+    let network = {
+        let mut parts = Vec::new();
+        if publication.asn != 0 {
+            parts.push(format!("AS{}", publication.asn));
+        }
+        for part in [&publication.org, &publication.city, &publication.country] {
+            if !part.is_empty() {
+                parts.push(part.clone());
+            }
+        }
+        if parts.is_empty() {
+            "an unknown network".to_string()
+        } else {
+            parts.join(", ")
+        }
+    };
+    let service = if publication.version.is_empty() {
+        String::new()
+    } else {
+        format!(" (service version {})", publication.version)
+    };
+    let published = format!(
+        "{} from {network} by HowFastly {}{service}",
+        engine::local_time(published_at),
+        publication.cargo
+    );
+    let expires = engine::local_time(expires_at);
+    let store = publication.store.clone();
+    let meta: Signal<Option<MetaResponse>> = RwSignal::new(Some(meta)).into();
+
     view! {
-        <div class="mt-2 h-24 w-full">
+        <RouteBar meta=meta tip=tips::PUBLICATION/>
+
+        <section class="rounded bg-nord-1 p-4">
+            <Map meta=meta active=RwSignal::new(true).into() quiet=RwSignal::new(true).into()>
+                <a
+                    class="absolute bottom-1 left-1 rounded bg-nord-10 px-3 py-1 text-sm text-nord-6 hover:bg-nord-9"
+                    href="/"
+                >
+                    "Run your own test"
+                </a>
+            </Map>
+        </section>
+
+        <section class="rounded bg-nord-1 p-4">
+            <h2 class="font-semibold">Shared result</h2>
+            <dl class="mt-2 grid gap-x-4 gap-y-1 sm:grid-cols-[max-content_1fr]">
+                <dt class="text-nord-4">Measured</dt>
+                <dd class="text-nord-6">{measured}</dd>
+                <dt class="text-nord-4">Published</dt>
+                <dd class="text-nord-6">{published}</dd>
+                <dt class="text-nord-4">Expires</dt>
+                <dd class="text-nord-6">{expires}</dd>
+            </dl>
+            <p class="mt-2 text-nord-4"><small>
+                "The network and datacenter are those of the connection that published this result, "
+                "which can differ from the one measured. Measurements come from the client and are not verified."
+            </small></p>
+        </section>
+
+        <div class="grid gap-8 lg:grid-cols-2">
+            <Throughput lane=down plans=down_plans empty=down_empty/>
+            <Throughput lane=up plans=up_plans empty=up_empty/>
+        </div>
+
+        <Latency unloaded=latency down=down up=up/>
+
+        // the build that published the result, checkable against the cache
+        {store.map(|path| view! { <StorePath path=path/> })}
+    }
+}
+
+// the network and the datacenter of a meta, each part shown when the server gave it
+// erased so the view owns its strings and outlives the borrow
+fn hops(m: &MetaResponse) -> AnyView {
+    let ip = (!m.ip.is_empty()).then(|| m.ip.clone());
+    let asn = (m.asn != 0).then_some(m.asn);
+    let paired = ip.is_some() && asn.is_some();
+    let unknown = ip.is_none() && asn.is_none();
+    let place = [m.city.as_str(), m.country.as_str()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let at = (!place.is_empty()).then(|| format!(" @ {place}"));
+    let code = m.pop.code.clone();
+    let name = (!m.pop.name.is_empty()).then(|| {
+        if m.pop.group.is_empty() {
+            format!(" ({})", m.pop.name)
+        } else {
+            format!(" ({}, {})", m.pop.name, m.pop.group)
+        }
+    });
+    let via = (!m.protocol.is_empty()).then(|| format!(" via {}", m.protocol));
+    view! {
+        {ip.map(|ip| view! {
+            <a href=format!("https://bgp.tools/prefix/{ip}") target="_blank" rel="noopener">{ip.clone()}</a>
+        })}
+        {paired.then_some(" (")}
+        {asn.map(|asn| view! {
+            <a href=format!("https://bgp.tools/as/{asn}") target="_blank" rel="noopener">{format!("AS{asn}")}</a>
+        })}
+        {paired.then_some(")")}
+        {unknown.then_some("-")}
+        {at}
+        " "
+        <svg
+            class="inline h-[1lh] w-[1em] align-bottom"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+        >
+            <path d="M2.5 8h11M9.5 4l4 4-4 4"/>
+        </svg>
+        " "
+        {code}
+        {name}
+        {via}
+    }
+    .into_any()
+}
+
+// the card with the network and the datacenter, a dash until the meta is known
+#[component]
+fn RouteBar(meta: Signal<Option<MetaResponse>>, tip: &'static str) -> impl IntoView {
+    view! {
+        <section class="rounded bg-nord-1 p-4">
+            <div class="text-center font-mono [overflow-wrap:anywhere]" title=tip>
+                {move || match meta.get() {
+                    Some(m) => hops(&m),
+                    None => view! { "-" }.into_any(),
+                }}
+            </div>
+        </section>
+    }
+}
+
+// the path-info line of a build, the path linking to its narinfo and the cache to its root
+#[component]
+fn StorePath(path: String) -> impl IntoView {
+    // the narinfo sits under the hash that opens the store name
+    let hash = path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.split('-').next())
+        .unwrap_or_default();
+    let href = format!("{CACHE}/{hash}.narinfo");
+    view! {
+        <pre class="overflow-x-auto rounded bg-nord-1 p-4 text-center text-sm text-nord-13"><code>
+            "nix path-info "
+            <a href=href target="_blank" rel="noopener">{path}</a>
+            " --store "
+            <a href=CACHE target="_blank" rel="noopener">{CACHE}</a>
+            " --json-format 2 --json"
+        </code></pre>
+    }
+}
+
+#[component]
+fn Footer() -> impl IntoView {
+    view! {
+        <footer class="text-center">
+            <p><small>
+                "Not an official "
+                <a href="https://www.fastly.com/" target="_blank" rel="noopener" referrerpolicy="origin">"Fastly"</a>
+                " product."
+            </small></p>
+            <p><small>
+                "Made by "
+                <a href="https://ysun.co" target="_blank" rel="noopener">"Yifei Sun"</a>
+                " aka "
+                <a href="https://github.com/stepbrobd" target="_blank" rel="noopener">"StepBroBD"</a>
+                ", source on "
+                <a href="https://github.com/stepbrobd/howfastly" target="_blank" rel="noopener">"GitHub"</a>
+                "."
+            </small></p>
+            <p class="mt-8"><small>
+                <a href="https://crates.io/crates/howfastly" target="_blank" rel="noopener">"HowFastly"</a>
+                " "
+                <a
+                    href=concat!(
+                        "https://github.com/stepbrobd/howfastly/releases/tag/",
+                        env!("CARGO_PKG_VERSION"),
+                    )
+                    target="_blank"
+                    rel="noopener"
+                >
+                    {env!("CARGO_PKG_VERSION")}
+                </a>
+            </small></p>
+        </footer>
+    }
+}
+
+const CHART_W: f64 = 300.0;
+const CHART_H: f64 = 80.0;
+const WAITING: &str = "Waiting for measurements...";
+
+#[component]
+fn Waiting(class: &'static str, text: &'static str) -> impl IntoView {
+    view! {
+        <div class=format!("flex items-center justify-center rounded text-nord-3 {class}")>
+            <small>{text}</small>
+        </div>
+    }
+}
+
+// stroke and fill classes of a direction
+fn palette(dir: Direction) -> (&'static str, &'static str) {
+    match dir {
+        Direction::Download => ("stroke-nord-8", "fill-nord-8"),
+        Direction::Upload => ("stroke-nord-12", "fill-nord-12"),
+    }
+}
+
+#[component]
+fn SpeedChart(lane: Lane, empty: &'static str) -> impl IntoView {
+    let (stroke, fill) = palette(lane.dir);
+    view! {
+        <div class="relative mt-2 h-24 w-full">
             {move || {
-                let pts = dir.points.get();
-                let line = svg_path(&pts, CHART_W, CHART_H);
+                let pts = lane.points.get();
+                let p90 = lane.summary.get().and_then(|d| d.p90).map(|mbps| mbps * 1e6);
+                // the scale grows to keep the reference line inside the frame
+                let max = peak(&pts).max(p90.unwrap_or(0.0));
+                let line = svg_path(&pts, CHART_W, CHART_H, max);
                 if line.is_empty() {
-                    return view! { <Waiting class="h-full bg-nord-0"/> }.into_any();
+                    return view! { <Waiting class="h-full bg-nord-0" text=empty/> }.into_any();
                 }
                 let area = format!("{line} L{CHART_W:.1},{CHART_H:.1} L0.0,{CHART_H:.1} Z");
+                let mark = p90.map(|v| chart_y(v, max, CHART_H).max(1.0));
                 view! {
                     <svg
                         class="h-full w-full"
@@ -255,7 +470,32 @@ fn SpeedChart(dir: Direction) -> impl IntoView {
                             stroke-linecap="round"
                             vector-effect="non-scaling-stroke"
                         />
+                        {mark.map(|y| view! {
+                            <line
+                                x1="0"
+                                x2=format!("{CHART_W:.1}")
+                                y1=format!("{y:.1}")
+                                y2=format!("{y:.1}")
+                                class="stroke-nord-4"
+                                stroke-opacity="0.7"
+                                stroke-dasharray="4 3"
+                                vector-effect="non-scaling-stroke"
+                            />
+                        })}
                     </svg>
+                    {mark.map(|y| {
+                        // the label sits under a high line and above a low one
+                        let side = if y < CHART_H / 2.0 { "" } else { "-translate-y-full" };
+                        view! {
+                            <small
+                                class=format!("absolute left-1 text-nord-4 {side}")
+                                style=format!("top:{:.1}%", y / CHART_H * 100.0)
+                                title=tips::HEADLINE
+                            >
+                                "90th percentile"
+                            </small>
+                        }
+                    })}
                 }
                     .into_any()
             }}
@@ -263,51 +503,42 @@ fn SpeedChart(dir: Direction) -> impl IntoView {
     }
 }
 
+// empty is what the chart says while it has no line, the live run waits, a share explains
+// one direction, the headline over the table of sizes
 #[component]
-fn Headline(label: &'static str, dir: Direction, state: State) -> impl IntoView {
+fn Throughput(
+    lane: Lane,
+    plans: Vec<SizePlan>,
+    #[prop(default = WAITING)] empty: &'static str,
+) -> impl IntoView {
+    view! {
+        <section class="flex flex-col gap-4">
+            <Headline lane=lane empty=empty/>
+            <SizeTable lane=lane plans=plans/>
+        </section>
+    }
+}
+
+#[component]
+fn Headline(lane: Lane, #[prop(default = WAITING)] empty: &'static str) -> impl IntoView {
+    let label = lane.dir.name();
     // live estimate while this direction transfers, p90 once summarized
     let speed = move || {
-        let live = dir.points.get().last().map(|&(_, bps)| bps);
-        let bps = if dir.running.get() {
+        let live = lane.points.get().last().map(|&(_, bps)| bps);
+        let bps = if lane.running.get() {
             live
         } else {
-            dir.summary
+            lane.summary
                 .get()
-                .and_then(|d| d.p90_mbps)
+                .and_then(|d| d.p90)
                 .map(|p90| p90 * 1e6)
                 .or(live)
         };
         bps.map(format_speed)
     };
-    let rerun = move |_| {
-        if state.running.get() {
-            return;
-        }
-        state.running.set(true);
-        state.error.set(None);
-        dir.reset();
-        spawn_local(async move {
-            if let Err(e) = run_one(dir).await {
-                state.error.set(Some(format!("{e:?}")));
-            }
-            dir.running.set(false);
-            state.running.set(false);
-        });
-    };
     view! {
-        <div
-            class=move || {
-                let cursor = if state.running.get() {
-                    "cursor-wait"
-                } else {
-                    "cursor-pointer hover:ring-1 hover:ring-nord-3"
-                };
-                format!("flex-1 rounded bg-nord-1 p-4 {cursor}")
-            }
-            title="Run this test again"
-            on:click=rerun
-        >
-            <div class="font-mono text-4xl text-nord-6">
+        <div class="flex-1 rounded bg-nord-1 p-4">
+            <div class="font-mono text-4xl text-nord-6" title=tips::HEADLINE>
                 {move || match speed() {
                     Some((v, unit)) => view! {
                         {format!("{v:.1}")}
@@ -319,45 +550,70 @@ fn Headline(label: &'static str, dir: Direction, state: State) -> impl IntoView 
             </div>
             <div class="flex justify-between">
                 <span>{label}</span>
-                <span class="text-nord-4">
+                <span class="text-nord-4" title=tips::PEAK>
                     <small>
                         {move || {
-                            let peak = dir
-                                .points
-                                .get()
-                                .iter()
-                                .map(|&(_, b)| b)
-                                .fold(0.0, f64::max);
-                            if peak > 0.0 {
-                                let (v, unit) = format_speed(peak);
-                                format!("Peak {v:.1} {unit}")
-                            } else {
-                                String::new()
+                            let pts = lane.points.get();
+                            if pts.is_empty() {
+                                return String::new();
                             }
+                            let (v, unit) = format_speed(peak(&pts));
+                            format!("Peak {v:.1} {unit}")
                         }}
                     </small>
                 </span>
             </div>
-            <SpeedChart dir=dir/>
+            <SpeedChart lane=lane empty=empty/>
         </div>
     }
 }
 
+// the unloaded round trips and the loaded ones of each direction
 #[component]
-fn LatencyCard(label: &'static str, summary: Signal<Option<LatencySummary>>) -> impl IntoView {
+fn Latency(unloaded: Signal<Option<LatencySummary>>, down: Lane, up: Lane) -> impl IntoView {
+    view! {
+        <section class="rounded bg-nord-1 p-4">
+            <h2 class="font-semibold">Latency</h2>
+            <div class="mt-2 grid gap-4 sm:grid-cols-3">
+                <LatencyCard label="Unloaded" tip=tips::UNLOADED summary=unloaded/>
+                <LatencyCard
+                    label="Download loaded"
+                    tip=tips::LOADED
+                    summary=Signal::derive(move || down.summary.get().and_then(|d| d.loaded))
+                />
+                <LatencyCard
+                    label="Upload loaded"
+                    tip=tips::LOADED
+                    summary=Signal::derive(move || up.summary.get().and_then(|d| d.loaded))
+                />
+            </div>
+        </section>
+    }
+}
+
+#[component]
+fn LatencyCard(
+    label: &'static str,
+    tip: &'static str,
+    summary: Signal<Option<LatencySummary>>,
+) -> impl IntoView {
     view! {
         <div>
-            <div><small>{label}</small></div>
+            <div title=tip><small>{label}</small></div>
             {move || match summary.get() {
                 Some(s) => view! {
                     <div class="text-nord-6">
-                        {format!("Median {:.1} ms / Jitter {:.1} ms", s.median_ms, s.jitter_ms)}
+                        {format!("Median {:.1} ms / ", s.median)}
+                        <span title=tips::JITTER>{format!("Jitter {:.1} ms", s.jitter)}</span>
                     </div>
-                    <div><small>{format!("Min {:.1} / Avg {:.1}", s.min_ms, s.avg_ms)}</small></div>
+                    <div><small>{format!("Min {:.1} / Avg {:.1}", s.min, s.avg)}</small></div>
                 }
                     .into_any(),
                 None => view! {
-                    <div class="text-nord-3">"Median - / Jitter -"</div>
+                    <div class="text-nord-3">
+                        "Median - / "
+                        <span title=tips::JITTER>"Jitter -"</span>
+                    </div>
                     <div class="text-nord-3"><small>"Min - / Avg -"</small></div>
                 }
                     .into_any(),
@@ -367,12 +623,8 @@ fn LatencyCard(label: &'static str, summary: Signal<Option<LatencySummary>>) -> 
 }
 
 #[component]
-fn BoxPlot(samples: Vec<f64>, max: f64, upload: bool) -> impl IntoView {
-    let (stroke, fill) = if upload {
-        ("stroke-nord-12", "fill-nord-12")
-    } else {
-        ("stroke-nord-8", "fill-nord-8")
-    };
+fn BoxPlot(samples: Vec<f64>, max: f64, dir: Direction) -> impl IntoView {
+    let (stroke, fill) = palette(dir);
     if samples.is_empty() {
         return view! { <svg class="block h-4 w-full"></svg> }.into_any();
     }
@@ -429,60 +681,74 @@ fn BoxPlot(samples: Vec<f64>, max: f64, upload: bool) -> impl IntoView {
     .into_any()
 }
 
+// plans are the sizes the run was configured with, a share carries its own
 #[component]
-fn SizeTable(title: &'static str, dir: Direction) -> impl IntoView {
+fn SizeTable(lane: Lane, plans: Vec<SizePlan>) -> impl IntoView {
+    let title = lane.dir.name();
     // render every planned size from the start so the height never changes
-    let plans: &'static [SizePlan] = if dir.upload {
-        &UPLOAD_PLAN
-    } else {
-        &DOWNLOAD_PLAN
-    };
     view! {
         {move || {
-            let live = dir.sizes.get();
-            let sizes: Vec<(SizeSamples, usize)> = plans
+            let live = lane.sizes.get();
+            let summary = lane.summary.get();
+            // raw samples when the run kept them, a summary still knows its counts and medians
+            let rows: Vec<(SizeSummary, usize, Vec<f64>)> = plans
                 .iter()
                 .map(|&SizePlan { bytes, iterations }| {
-                    let s = live
-                        .iter()
-                        .find(|s| s.bytes == bytes)
-                        .cloned()
-                        .unwrap_or(SizeSamples {
-                            bytes,
-                            mbps: Vec::new(),
-                            skipped: false,
-                        });
-                    (s, iterations)
+                    let (s, mbps) = match live.iter().find(|s| s.bytes == bytes) {
+                        Some(s) => (
+                            SizeSummary {
+                                bytes,
+                                samples: s.mbps.len(),
+                                median: stats::median(&s.mbps),
+                                skipped: s.skipped,
+                            },
+                            s.mbps.clone(),
+                        ),
+                        None => (
+                            summary
+                                .as_ref()
+                                .and_then(|d| d.sizes.iter().find(|s| s.bytes == bytes).cloned())
+                                .unwrap_or(SizeSummary {
+                                    bytes,
+                                    ..Default::default()
+                                }),
+                            Vec::new(),
+                        ),
+                    };
+                    (s, iterations, mbps)
                 })
                 .collect();
-            let max = sizes
+            let max = rows
                 .iter()
-                .flat_map(|(s, _)| s.mbps.iter().copied())
+                .flat_map(|(_, _, mbps)| mbps.iter().copied())
                 .fold(f64::EPSILON, f64::max);
             view! {
                 <table class="w-full border-separate border-spacing-0 overflow-hidden rounded border border-nord-3">
                     <thead>
                         <tr>
-                            <th class="border-b border-nord-3 bg-nord-0 px-4 py-2 text-left font-semibold text-nord-6">
+                            <th class="border-b border-nord-3 bg-nord-0 px-2 py-2 text-left font-semibold text-nord-6 sm:px-4">
                                 {title}
                             </th>
-                            <th class="border-b border-nord-3 bg-nord-0 px-4 py-2 text-left font-semibold text-nord-6">
+                            <th
+                                class="border-b border-nord-3 bg-nord-0 px-2 py-2 text-left font-semibold text-nord-6 sm:px-4"
+                                title=tips::MEDIAN
+                            >
                                 "Median"
                             </th>
-                            <th class="w-1/2 border-b border-nord-3 bg-nord-0 px-4 py-2"></th>
+                            <th class="w-1/3 border-b border-nord-3 bg-nord-0 px-2 py-2 sm:w-1/2 sm:px-4"></th>
                         </tr>
                     </thead>
                     <tbody>
-                        {sizes
+                        {rows
                             .into_iter()
-                            .map(|(s, iterations)| {
+                            .map(|(s, iterations, mbps)| {
                                 let label = format!(
                                     "{} ({}/{})",
                                     size_label(s.bytes),
-                                    s.mbps.len(),
+                                    s.samples,
                                     iterations,
                                 );
-                                let text = match (stats::median(&s.mbps), s.skipped) {
+                                let text = match (s.median, s.skipped) {
                                     (Some(m), _) => {
                                         let (v, unit) = format_speed(m * 1e6);
                                         format!("{v:.1} {unit}")
@@ -492,10 +758,10 @@ fn SizeTable(title: &'static str, dir: Direction) -> impl IntoView {
                                 };
                                 view! {
                                     <tr class="odd:bg-nord-1">
-                                        <td class="px-4 py-2">{label}</td>
-                                        <td class="px-4 py-2 font-mono">{text}</td>
-                                        <td class="px-4 py-2">
-                                            <BoxPlot samples=s.mbps max=max upload=dir.upload/>
+                                        <td class="px-2 py-2 whitespace-nowrap sm:px-4" title=tips::count()>{label}</td>
+                                        <td class="px-2 py-2 font-mono whitespace-nowrap sm:px-4" title=tips::MEDIAN>{text}</td>
+                                        <td class="px-2 py-2 sm:px-4" title=tips::PLOT>
+                                            <BoxPlot samples=mbps max=max dir=lane.dir/>
                                         </td>
                                     </tr>
                                 }
@@ -508,145 +774,41 @@ fn SizeTable(title: &'static str, dir: Direction) -> impl IntoView {
     }
 }
 
-// per direction bookkeeping that survives across interleaved segments
-struct DirRun {
-    dir: Direction,
-    plans: Vec<SizePlan>,
-    events: Rc<RefCell<Vec<(f64, u64)>>>,
-    active_ms: f64,
-    out: Vec<SizeSamples>,
-    loaded: Vec<f64>,
-}
-
-impl DirRun {
-    fn new(dir: Direction, plans: Vec<SizePlan>) -> Self {
-        Self {
-            dir,
-            plans,
-            events: Rc::new(RefCell::new(Vec::new())),
-            active_ms: 0.0,
-            out: Vec::new(),
-            loaded: Vec::new(),
-        }
-    }
-}
-
-async fn run_all(state: State) -> Result<(), JsValue> {
-    let cfg = TestConfig::default();
-
-    let mut pings = Vec::new();
-    for _ in 0..cfg.latency_samples {
-        pings.push(engine::ping().await?);
-    }
-    state.latency.set(summarize_latency(&pings));
-
-    // alternate size classes so both directions estimate early
-    let mut down = DirRun::new(state.down, cfg.download.clone());
-    let mut up = DirRun::new(state.up, cfg.upload.clone());
-    for i in 0..down.plans.len().max(up.plans.len()) {
-        for run in [&mut down, &mut up] {
-            if let Some(&plan) = run.plans.get(i) {
-                segment(run, plan, cfg.time_budget_secs).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn run_one(dir: Direction) -> Result<(), JsValue> {
-    let cfg = TestConfig::default();
-    let plans = if dir.upload { cfg.upload } else { cfg.download };
-    let mut run = DirRun::new(dir, plans.clone());
-    for plan in plans {
-        segment(&mut run, plan, cfg.time_budget_secs).await?;
-    }
-    Ok(())
-}
-
-// one size class for one direction with its own loaded latency pinger
-async fn segment(run: &mut DirRun, plan: SizePlan, budget_secs: f64) -> Result<(), JsValue> {
-    run.dir.running.set(true);
-    let stop = Rc::new(Cell::new(false));
-    let seg_loaded = Rc::new(RefCell::new(Vec::new()));
-
-    spawn_local({
-        let stop = stop.clone();
-        let seg_loaded = seg_loaded.clone();
-        async move {
-            while !stop.get() {
-                if let Ok(ms) = engine::ping().await {
-                    seg_loaded.borrow_mut().push(ms);
+#[component]
+fn Controls(state: State) -> impl IntoView {
+    let primary = "cursor-pointer rounded bg-nord-10 px-3 py-1 text-sm text-nord-6 hover:bg-nord-9";
+    let plain = "cursor-pointer rounded bg-nord-1 px-3 py-1 text-sm text-nord-4 hover:bg-nord-2";
+    let quiet = "rounded bg-nord-1 px-3 py-1 text-sm text-nord-4";
+    view! {
+        <div class="absolute bottom-1 left-1 flex gap-1">
+            {move || match state.phase.get() {
+                Phase::Idle => view! {
+                    <button class=primary on:click=move |_| run::launch(state)>"Retest"</button>
+                    // only a completed run has something to share, the chip follows the publication
+                    {move || state.snapshot.with(|s| s.is_some()).then(|| match state.share.get() {
+                        Share::Publishing => view! { <span class=quiet>"Sharing"</span> }.into_any(),
+                        Share::Ready | Share::Published { .. } | Share::Failed(_) => view! {
+                            <button class=plain on:click=move |_| share::publish(state)>"Share"</button>
+                        }
+                            .into_any(),
+                    })}
                 }
-                TimeoutFuture::new(LOADED_PING_INTERVAL_MS as u32).await;
-            }
-        }
-    });
-
-    let seg_start = engine::now_ms();
-    let mut s = SizeSamples {
-        bytes: plan.bytes,
-        mbps: Vec::new(),
-        skipped: false,
-    };
-    for _ in 0..plan.iterations {
-        if (run.active_ms + engine::now_ms() - seg_start) / 1e3 > budget_secs {
-            s.skipped = true;
-            break;
-        }
-        let progress = recorder(run.dir, run.active_ms, seg_start, run.events.clone());
-        let sample = if run.dir.upload {
-            engine::upload(plan.bytes, progress).await
-        } else {
-            engine::download(plan.bytes, progress).await
-        };
-        let mbps = match sample {
-            Ok(mbps) => mbps,
-            Err(e) => {
-                stop.set(true);
-                run.dir.running.set(false);
-                return Err(e);
-            }
-        };
-        s.mbps.push(mbps);
-        let mut live = run.out.clone();
-        live.push(s.clone());
-        run.dir.sizes.set(live);
-    }
-    stop.set(true);
-
-    run.active_ms += engine::now_ms() - seg_start;
-    run.out.push(s);
-    run.loaded.extend(seg_loaded.borrow().iter().copied());
-    run.dir
-        .points
-        .set(throughput_points(&run.events.borrow(), WINDOW_MS, EMIT_MS));
-    run.dir.sizes.set(run.out.clone());
-    run.dir
-        .summary
-        .set(Some(summarize_direction(&run.out, &run.loaded)));
-    run.dir.running.set(false);
-    Ok(())
-}
-
-// per transfer closure turning cumulative bytes into active timeline deltas
-// the x axis counts only this direction's own transfer time
-fn recorder(
-    dir: Direction,
-    base_ms: f64,
-    seg_start: f64,
-    events: Rc<RefCell<Vec<(f64, u64)>>>,
-) -> impl FnMut(f64, u64) + 'static {
-    let mut last_bytes = 0u64;
-    let mut last_set = 0.0f64;
-    move |now, cumulative| {
-        let t = base_ms + (now - seg_start);
-        let delta = cumulative.saturating_sub(last_bytes);
-        last_bytes = cumulative;
-        events.borrow_mut().push((t, delta));
-        if t - last_set >= EMIT_MS {
-            last_set = t;
-            dir.points
-                .set(throughput_points(&events.borrow(), WINDOW_MS, EMIT_MS));
-        }
+                    .into_any(),
+                Phase::Running => view! {
+                    <button class=plain on:click=move |_| run::pause(state)>"Pause"</button>
+                    <button class=plain on:click=move |_| run::cancel(state)>"Cancel"</button>
+                }
+                    .into_any(),
+                Phase::Paused => view! {
+                    <button class=primary on:click=move |_| run::resume(state)>"Resume"</button>
+                    <button class=plain on:click=move |_| run::cancel(state)>"Cancel"</button>
+                }
+                    .into_any(),
+                Phase::Canceled => view! {
+                    <span class=quiet>"Stopping"</span>
+                }
+                    .into_any(),
+            }}
+        </div>
     }
 }

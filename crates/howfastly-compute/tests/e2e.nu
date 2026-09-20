@@ -3,22 +3,229 @@
 use std/assert
 
 def fetch [path: string]: nothing -> record {
-  http get --full --allow-errors $path
+  http get --full --allow-errors --redirect-mode manual $path
+}
+
+# a dead link or a typo answers the shell under the status, so the app can take the visitor home
+def shell-under [response: record, status: int] {
+  assert equal $response.status $status
+  assert ((($response.headers.response | where name == content-type | first | get value) | str lowercase) =~ "text/html")
+  assert (($response.body | into string) | str contains '<title>HowFastly: Internet Speed Test Powered by Fastly Compute</title>')
+}
+
+# the alias hostname hands its pages over to the canonical one, the api stays
+def via-alias [url: string, path: string]: nothing -> string {
+  curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: howfastly.edgecompute.app' $"($url)($path)"
+}
+
+def share-payload [] {
+  {
+    format: 1
+    client: cli
+    build: e2e
+    finished_at: ((date now | into int) // 1_000_000_000)
+    config: {
+      latency_samples: 1
+      download: [{bytes: 100_000, iterations: 1}]
+      upload: []
+      time_budget_secs: 30.0
+    }
+    latency: {min: 10.0, avg: 10.0, median: 10.0, jitter: 0.0}
+    download: {
+      summary: {
+        p90: 100.0
+        sizes: [{bytes: 100_000, samples: 1, median: 100.0, skipped: false}]
+        loaded: null
+      }
+      samples: null
+      timeline: null
+    }
+    upload: null
+  }
+}
+
+def sharing [url: string] {
+  let payload = share-payload
+  let created = http post --full --allow-errors --content-type application/json $"($url)/share" $payload
+  assert equal $created.status 201
+  let link = $created.body
+  assert ($link.id =~ '^[0-9a-f]{64}$')
+  assert equal $link.url $"($url)/share/($link.id)"
+
+  let result = fetch $"($link.url).json"
+  assert equal $result.status 200
+  let report = $result.body
+  assert equal $report.download.summary.p90 100.0
+  assert equal $report.client cli
+  assert equal ($report.expires_at - $report.published_at) 604_800
+  assert equal $link.expires_at $report.expires_at
+  assert (not ("ip" in ($report.publication | columns)))
+  # the record freshness replaces the no-store every other response carries
+  let cache = $result.headers.response | where name == cache-control
+  assert equal ($cache | length) 1
+  let cache = $cache | first | get value
+  let age = $cache | parse --regex 'max-age=(?<seconds>[0-9]+)' | first | get seconds | into int
+  assert ($age > 0 and $age <= 604_800)
+  assert ($cache | str contains immutable)
+  assert (not ($cache | str contains no-store))
+
+  # cross a clock tick so an accidental overwrite would change publication time
+  sleep 1100ms
+  let repeated = http post --full --allow-errors --content-type application/json $"($url)/share" $payload
+  assert equal $repeated.status 200
+  assert equal $repeated.body $link
+  assert equal (http get $"($link.url).json") $report
+
+  # the page is the shell with a head written for this result and the report embedded
+  let page = fetch $link.url
+  assert equal $page.status 200
+  assert equal ($page.headers.response | where name == cache-control | first | get value) no-cache
+  # nothing under share is for search indexes, a result is reached by its link
+  assert equal ($page.headers.response | where name == x-robots-tag | first | get value) noindex
+  assert equal ($result.headers.response | where name == x-robots-tag | first | get value) noindex
+  let html = $page.body | into string
+  assert ($html | str contains '<title>HowFastly: 100.0 Mbps Down, 10.0 ms Latency</title>')
+  assert ($html | str contains ('<meta property="og:url" content="' + $link.url + '" />'))
+  assert ($html | str contains '<script id="howfastly-report" type="application/json">{"format":1,')
+  assert equal ($html | split row '<title>' | length) 2
+  # the page block is rewritten whole, the site wide tags and the icon stay
+  assert equal ($html | split row 'property="og:title"' | length) 2
+  assert (not ($html | str contains 'rel="canonical"'))
+  assert ($html | str contains 'href="/favicon.png"')
+  assert ($html | str contains 'name="google-site-verification"')
+  # a build string cannot close the script element, it reaches the page as json escapes
+  let hostile = $payload | upsert build '</script><svg/onload=alert(1)>'
+  let planted = http post --full --allow-errors --content-type application/json $"($url)/share" $hostile
+  assert equal $planted.status 201
+  let html = http get $planted.body.url | into string
+  assert (not ($html | str contains '"build":"</script>'))
+  assert ($html | str contains '"build":"\u003c/script\u003e\u003csvg/onload=alert(1)\u003e"')
+  assert ($html | str contains 'content="Measured ')
+  assert (not ($html | str contains '</script><svg'))
+  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $link.url) "200"
+  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($link.url).json") "200"
+  shell-under (fetch $"($url)/share") 404
+  shell-under (fetch $"($url)/share/short") 404
+  assert equal (fetch $"($url)/share/short.json" | get status) 404
+  assert equal (http delete --full --allow-errors $link.url | get status) 405
+  assert equal (http delete --full --allow-errors $link.url | get headers.response | where name == allow | first | get value) "GET, HEAD"
+  assert equal (http post --full --allow-errors --content-type text/plain $"($url)/share" "nope" | get status) 415
+  assert equal (http post --full --allow-errors --content-type application/json $"($url)/share" "nope" | get status) 400
+  assert equal (http post --full --allow-errors --content-type application/json $"($url)/share" ($payload | upsert format 2) | get status) 422
+  # a finish time older than a day is refused before anything is stored
+  assert equal (http post --full --allow-errors --content-type application/json $"($url)/share" ($payload | upsert finished_at 1_000_000_000) | get status) 400
+  # nu reserializes a json body and would drop the padding, curl sends the bytes
+  let oversized = ($payload | to json --raw) ++ ("" | fill --width 65537)
+  let refused = $oversized | curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' --data-binary @- $"($url)/share"
+  assert equal $refused "413"
+
+  # the seeded record remains in KV despite being past its public expiry
+  let expired = $"($url)/share/0000000000000000000000000000000000000000000000000000000000000000"
+  shell-under (fetch $expired) 404
+  assert equal (fetch $"($expired).json" | get status) 404
+  let unsupported = $"($url)/share/1111111111111111111111111111111111111111111111111111111111111111"
+  shell-under (fetch $unsupported) 422
+  assert equal (fetch $"($unsupported).json" | get status) 422
+  let missing = fetch $"($url)/share/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff.json"
+  assert equal $missing.status 404
+  assert equal ($missing.headers.response | where name == cache-control | first | get value) no-store
+
+  # viceroy stubs the rate limiter, the probe must still run and say so
+  assert equal (nu ($env.FILE_PWD | path join burst.nu) $url --pause 0sec | str trim) unlimited
 }
 
 def checks [url: string, log: string] {
   assert equal (fetch $"($url)/ping" | get status) 204
   assert equal (fetch $"($url)/down?bytes=abc" | get status) 400
   assert equal (http delete --full --allow-errors $"($url)/ping" | get status) 405
-  assert equal (fetch $"($url)/nope" | get status) 404
+  assert equal (http delete --full --allow-errors $"($url)/ping" | get headers.response | where name == allow | first | get value) "GET, HEAD"
+  shell-under (fetch $"($url)/nope") 404
+  shell-under (fetch $"($url)/index.html") 404
+  assert equal (fetch $"($url)/assets/nope.js" | get status) 404
+  assert equal (http post --full --allow-errors $"($url)/nope" "" | get status) 404
+
+  # what search engines read
+  let shell = http get $"($url)/" | into string
+  assert ($shell | str contains '<link rel="canonical" href="https://speed.edgecompute.app/" />')
+  assert ($shell | str contains '<title>HowFastly: Internet Speed Test Powered by Fastly Compute</title>')
+  assert ($shell | str contains 'type="application/ld+json"')
+  let robots = fetch $"($url)/robots.txt"
+  assert equal $robots.status 200
+  assert (($robots.headers.response | where name == content-type | first | get value) =~ "text/plain")
+  assert (($robots.body | into string) | str contains "Disallow: /down\n")
+  assert (($robots.body | into string) | str contains "Sitemap: https://speed.edgecompute.app/sitemap.xml\n")
+  assert (not (($robots.body | into string) | str contains "/share"))
+  # raw keeps nu from parsing the xml into a record
+  let sitemap = http get --full --allow-errors --raw $"($url)/sitemap.xml"
+  assert equal $sitemap.status 200
+  assert (($sitemap.headers.response | where name == content-type | first | get value) =~ "application/xml")
+  assert (($sitemap.body | into string) | str contains "<loc>https://speed.edgecompute.app/</loc>")
+  assert equal (http post --full --allow-errors $"($url)/robots.txt" "" | get status) 405
+  for file in [favicon.ico favicon.png] {
+    let icon = fetch $"($url)/($file)"
+    assert equal $icon.status 200
+    assert equal ($icon.headers.response | where name == content-type | first | get value) image/png
+    assert equal ($icon.headers.response | where name == cache-control | first | get value) "public, max-age=86400"
+    assert (($icon.body | into binary | bytes at 1..3) == ("PNG" | into binary))
+  }
+  # the detail cells of the route map, a file for every cell and an empty one for open sea
+  let cell = fetch $"($url)/cells/10m/-90_40.txt"
+  assert equal $cell.status 200
+  assert (($cell.headers.response | where name == content-type | first | get value) =~ "text/plain")
+  assert equal ($cell.headers.response | where name == cache-control | first | get value) "public, max-age=86400"
+  let body = $cell.body | into string
+  assert ($body | str starts-with "=land\n")
+  assert ($body | str contains "\n=urban\n")
+  assert ($body | str contains "\n=admin1\n")
+  assert ($body | str contains "\n=places\n")
+  assert ($body | str contains "\tChicago\n")
+  assert ((fetch $"($url)/cells/50m/-90_30.txt" | get body | into string) | str contains "=land\n")
+  assert equal ((fetch $"($url)/cells/10m/-150_-60.txt" | get body | into string) | str length) 0
+  assert equal (fetch $"($url)/cells/10m/nope.txt" | get status) 404
+  assert equal (fetch $"($url)/cells/10m/-95_40.txt" | get status) 404
+  assert equal (fetch $"($url)/cells/10m/" | get status) 404
+  assert equal (http delete --full --allow-errors $"($url)/cells/10m/-90_40.txt" | get status) 405
+  assert equal (http delete --full --allow-errors $"($url)/cells/10m/-90_40.txt" | get headers.response | where name == allow | first | get value) "GET, HEAD"
+  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/cells/10m/-90_40.txt") "200"
+  assert equal (via-alias $url "/cells/10m/-90_40.txt") "308 https://speed.edgecompute.app/cells/10m/-90_40.txt"
+  assert (($robots.body | into string) | str contains "Disallow: /cells\n")
+
+  assert equal (via-alias $url "/") "308 https://speed.edgecompute.app/"
+  assert equal (via-alias $url "/share/abc?x=1") "308 https://speed.edgecompute.app/share/abc?x=1"
+  assert equal (via-alias $url "/robots.txt") "308 https://speed.edgecompute.app/robots.txt"
+  assert equal (via-alias $url "/ping") "204 "
+  assert equal (via-alias $url "/share/abc.json") "404 "
+
+  # a head takes the get path and answers with its headers alone
+  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/") "200"
+  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/ping") "204"
+  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/down?bytes=1000") "200"
+  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/nope") "404"
+  assert equal (curl -s -o /dev/null -w '%{http_code}' -I $"($url)/robots.txt") "200"
+  assert ((curl -sI $"($url)/" | str lowercase) =~ "content-type: text/html")
   assert equal (http get $"($url)/down?bytes=1000000" | into binary | bytes length) 1000000
 
   let up = http post --full --allow-errors --content-type application/octet-stream $"($url)/up" (random binary 100_000)
   assert equal ($up | get status) 200
 
-  assert ((http get $"($url)/meta" | get client_ip | str length) > 0)
+  let meta = http get $"($url)/meta"
+  assert (($meta.ip | str length) > 0)
+  # viceroy geolocates the loopback address, the pop lookup has no store locally
+  assert equal ($meta.coordinates.latitude | describe) "float"
+  assert equal $meta.pop.coordinates null
+  # only a nix built wasm knows its store path
+  if ($meta.store? | is-not-empty) {
+    assert ($meta.store | str starts-with "/nix/store/")
+  }
+  assert equal (http post --full --allow-errors $"($url)/start" "" | get status) 204
+  let results = {meta: null, latency: null, download: null, upload: null}
+  assert equal (http post --full --allow-errors --content-type application/json $"($url)/finish" {outcome: completed, results: $results} | get status) 204
+  assert equal (http post --full --allow-errors --content-type application/json $"($url)/finish" {outcome: left, stage: {phase: transfer, direction: upload, bytes: 100000}, results: $results} | get status) 204
+  assert equal (http post --full --allow-errors --content-type application/json $"($url)/finish" $results | get status) 400
+  assert equal (http post --full --allow-errors --content-type application/json $"($url)/finish" "nope" | get status) 400
   assert ((http get $"($url)/" | into string) =~ "HowFastly")
   assert ((fetch $"($url)/ping" | get headers.response | where name == "server-timing" | length) > 0)
+  sharing $url
 
   # clients hanging up mid-download are normal for a speed test
   # the guest must stay quiet and the server must keep serving
@@ -37,22 +244,56 @@ def checks [url: string, log: string] {
   assert ($elapsed < 10sec) $"50mb upload took ($elapsed)"
 }
 
+# a prebuilt wasm in HOWFASTLY_WASM skips the builds, the nix check hands one in
+def wasm []: nothing -> string {
+  if "HOWFASTLY_WASM" in $env {
+    return $env.HOWFASTLY_WASM
+  }
+  let root = $env.FILE_PWD | path join .. .. .. | path expand
+  # dist must exist before compute is built
+  do { cd $"($root)/crates/howfastly-web"; trunk build }
+  cargo build -p howfastly-compute --release --target wasm32-wasip1
+  $"($root)/target/wasm32-wasip1/release/howfastly-compute.wasm"
+}
+
 def main [] {
-  let root = git rev-parse --show-toplevel | str trim
   # avoid viceroy's default port since a dev serve session may be running
   let addr = "127.0.0.1:17676"
   let url = $"http://($addr)"
 
-  # dist must exist before compute is built
-  do { cd $"($root)/crates/howfastly-web"; trunk build }
-
-  cargo build -p howfastly-compute --release --target wasm32-wasip1
-  let wasm = $"($root)/target/wasm32-wasip1/release/howfastly-compute.wasm"
+  let wasm = wasm
   let log = mktemp -t viceroy-e2e-XXXXXX.log
+  let config = mktemp -t viceroy-sharing-XXXXXX.toml
+  let manifest = if "HOWFASTLY_CONFIG" in $env {
+    $env.HOWFASTLY_CONFIG
+  } else {
+    $env.FILE_PWD | path join .. .. .. fastly.toml | path expand
+  }
+  let expired = share-payload | merge {
+    published_at: 0
+    expires_at: 1
+    publication: {
+      asn: 0, org: "", city: "", country: "", coordinates: null
+      pop: {code: "", name: "", group: "", coordinates: null}
+      protocol: "", version: "", cargo: e2e, store: null
+    }
+  }
+  # tests use local stores without sending analytics to the configured backend
+  open $manifest
+    | upsert local_server.backends {}
+    | upsert local_server.kv_stores {kvstore: [{
+      key: "0000000000000000000000000000000000000000000000000000000000000000"
+      data: ($expired | to json --raw)
+    }, {
+      key: "1111111111111111111111111111111111111111111111111111111111111111"
+      data: '{"format":2}'
+    }]}
+    | to toml
+    | save --force $config
 
   # jobs are not killed when a script dies on an error
   # clean up explicitly on both paths
-  let server = job spawn { viceroy serve --addr $addr $wasm o+e> $log }
+  let server = job spawn { viceroy serve --config $config --addr $addr $wasm o+e> $log }
 
   mut ready = false
   for _ in 1..50 {
@@ -67,12 +308,17 @@ def main [] {
     null
   } catch { |err| $err }
 
-  job kill $server
-  rm $log
+  # the job is already gone when viceroy died on its own
+  try { job kill $server }
+  rm $config
 
   if $failure != null {
     print -e ($failure.debug? | default $failure.msg)
+    print -e "viceroy log:"
+    print -e (open $log)
+    rm $log
     exit 1
   }
+  rm $log
   print ok
 }

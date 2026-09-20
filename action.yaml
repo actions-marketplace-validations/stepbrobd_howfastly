@@ -17,24 +17,24 @@ inputs:
     default: ""
 
 outputs:
-  download-mbps:
+  download:
     description: 90th-percentile download throughput in Mbps (empty when not measured)
-    value: ${{ steps.results.outputs.download-mbps }}
-  upload-mbps:
+    value: ${{ steps.results.outputs.download }}
+  upload:
     description: 90th-percentile upload throughput in Mbps (empty when not measured)
-    value: ${{ steps.results.outputs.upload-mbps }}
-  latency-ms:
+    value: ${{ steps.results.outputs.upload }}
+  latency:
     description: Median unloaded latency in milliseconds (empty when not measured)
-    value: ${{ steps.results.outputs.latency-ms }}
+    value: ${{ steps.results.outputs.latency }}
   pop:
-    description: Fastly POP that served the test (empty when not reported)
+    description: Three letter code of the Fastly POP that served the test (empty when not reported)
     value: ${{ steps.results.outputs.pop }}
   json:
     description: Full results as compact JSON
     value: ${{ steps.results.outputs.json }}
-  results-path:
+  results:
     description: Path to the pretty-printed results JSON file (empty when no results were written)
-    value: ${{ steps.results.outputs.results-path }}
+    value: ${{ steps.results.outputs.results }}
 
 runs:
   using: composite
@@ -122,7 +122,7 @@ runs:
       run: |
         set -euo pipefail
 
-        # a custom command may handle results itself
+        # a custom command need not write the results file
         if [ ! -s "${HOWFASTLY_RESULTS}" ]; then
           echo "::notice::No results at ${HOWFASTLY_RESULTS}, skipping outputs and summary"
           exit 0
@@ -133,11 +133,11 @@ runs:
         fi
 
         {
-          echo "download-mbps=$(jq -r '.download.p90_mbps // ""' "${HOWFASTLY_RESULTS}")"
-          echo "upload-mbps=$(jq -r '.upload.p90_mbps // ""' "${HOWFASTLY_RESULTS}")"
-          echo "latency-ms=$(jq -r '.latency.median_ms // ""' "${HOWFASTLY_RESULTS}")"
-          echo "pop=$(jq -r '.meta.pop // ""' "${HOWFASTLY_RESULTS}")"
-          echo "results-path=${HOWFASTLY_RESULTS}"
+          echo "download=$(jq -r '.download.p90 // ""' "${HOWFASTLY_RESULTS}")"
+          echo "upload=$(jq -r '.upload.p90 // ""' "${HOWFASTLY_RESULTS}")"
+          echo "latency=$(jq -r '.latency.median // ""' "${HOWFASTLY_RESULTS}")"
+          echo "pop=$(jq -r '.meta.pop.code // ""' "${HOWFASTLY_RESULTS}")"
+          echo "results=${HOWFASTLY_RESULTS}"
           echo 'json<<__HOWFASTLY_JSON__'
           jq -c . "${HOWFASTLY_RESULTS}"
           echo '__HOWFASTLY_JSON__'
@@ -145,15 +145,16 @@ runs:
 
         jq -r '
           def n2: if . == null then "-" else ((. * 100 | round) / 100 | tostring) end;
-          def lat: if . == null then "-" else "\(.median_ms | n2) / \(.jitter_ms | n2)" end;
-          def row(name): if . == null then empty else "| \(name) | \(.p90_mbps | n2) | \(.loaded_latency | lat) |" end;
+          def lat: if . == null then "-" else "\(.median | n2) / \(.jitter | n2)" end;
+          def row(name): if . == null then empty else "| \(name) | \(.p90 | n2) | \(.loaded | lat) |" end;
+          def pop: ([.name, .group] | map(select(. != "")) | join(", ")) as $d | .code + (if $d == "" then "" else " (\($d))" end);
           ( ["### HowFastly", ""]
           + (if .meta == null then [] else
-              ["Served by \(.meta.pop) in \(.meta.city), \(.meta.country) via \(.meta.as_org) (AS\(.meta.asn)) over \(.meta.protocol)", ""] end)
+              ["From \(.meta.city), \(.meta.country) (\(.meta.org), AS\(.meta.asn)) to \(.meta.pop | pop) over \(.meta.protocol)", ""] end)
           + ["| Direction | p90 Mbps | Loaded latency (median / jitter ms) |", "| --- | --- | --- |"]
           + [(.download | row("Download")), (.upload | row("Upload"))]
           + (if .latency == null then [] else
-              ["", "Unloaded latency median \(.latency.median_ms | n2) ms, jitter \(.latency.jitter_ms | n2) ms"] end)
+              ["", "Unloaded latency median \(.latency.median | n2) ms, jitter \(.latency.jitter | n2) ms"] end)
           + [""]
           ) | join("\n")
         ' "${HOWFASTLY_RESULTS}" >> "$GITHUB_STEP_SUMMARY"

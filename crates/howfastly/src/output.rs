@@ -1,5 +1,5 @@
 use anyhow::Result;
-use howfastly::types::{DirectionSummary, SpeedtestResults};
+use howfastly::types::{Direction, DirectionSummary, SpeedtestResults};
 
 use crate::OutputFormat;
 
@@ -16,16 +16,17 @@ fn fmt_opt(v: Option<f64>) -> String {
 }
 
 fn csv(r: &SpeedtestResults) -> String {
-    let mut out = String::from("direction,size_bytes,samples,median_mbps,p90_mbps\n");
-    for (name, dir) in [("download", &r.download), ("upload", &r.upload)] {
-        let Some(d) = dir else { continue };
+    let mut out = String::from("direction,bytes,samples,median,p90\n");
+    for dir in Direction::ALL {
+        let Some(d) = r.direction(dir) else { continue };
+        let name = dir.name().to_lowercase();
         for s in &d.sizes {
             out += &format!(
                 "{name},{},{},{},{}\n",
                 s.bytes,
                 s.samples,
-                fmt_opt(s.median_mbps),
-                fmt_opt(d.p90_mbps),
+                fmt_opt(s.median),
+                fmt_opt(d.p90),
             );
         }
     }
@@ -35,11 +36,11 @@ fn csv(r: &SpeedtestResults) -> String {
 // progress already streamed each measurement to stderr
 // only summarize what is new (p90 headline and loaded latency)
 fn direction_block(name: &str, d: &DirectionSummary) -> String {
-    let mut out = format!("{name}: {} Mbps (p90)\n", fmt_opt(d.p90_mbps));
-    if let Some(l) = &d.loaded_latency {
+    let mut out = format!("{name}: {} Mbps (p90)\n", fmt_opt(d.p90));
+    if let Some(l) = &d.loaded {
         out += &format!(
             "{name} loaded latency: Median {:.1} ms / Jitter {:.1} ms\n",
-            l.median_ms, l.jitter_ms,
+            l.median, l.jitter,
         );
     }
     out
@@ -47,9 +48,9 @@ fn direction_block(name: &str, d: &DirectionSummary) -> String {
 
 fn human(r: &SpeedtestResults) -> String {
     let mut out = String::from("\n");
-    for (name, dir) in [("Download", &r.download), ("Upload", &r.upload)] {
-        if let Some(d) = dir {
-            out += &direction_block(name, d);
+    for dir in Direction::ALL {
+        if let Some(d) = r.direction(dir) {
+            out += &direction_block(dir.name(), d);
         }
     }
     out
@@ -84,18 +85,20 @@ mod tests {
     }
 
     #[test]
-    fn csv_has_header_and_rows() {
+    fn csv_exact() {
         let s = render(&results(), crate::OutputFormat::Csv).unwrap();
-        let lines: Vec<_> = s.lines().collect();
-        assert!(lines[0].starts_with("direction,"));
-        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            s,
+            "direction,bytes,samples,median,p90\ndownload,100000,1,50.00,50.00\n"
+        );
     }
 
     #[test]
-    fn human_mentions_sections() {
+    fn human_exact() {
         let s = render(&results(), crate::OutputFormat::Human).unwrap();
-        assert!(s.contains("latency"));
-        assert!(s.contains("Download"));
-        assert!(!s.contains("Upload:"));
+        assert_eq!(
+            s,
+            "\nDownload: 50.00 Mbps (p90)\nDownload loaded latency: Median 5.5 ms / Jitter 1.0 ms\n"
+        );
     }
 }

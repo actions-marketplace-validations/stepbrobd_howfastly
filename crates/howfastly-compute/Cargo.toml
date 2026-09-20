@@ -2,13 +2,13 @@
 name    = "howfastly-compute"
 publish = false
 
-edition.workspace = true
-version.workspace = true
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
 
 # the bin only builds for wasm32-wasip1, keep it out of host test builds
 [[bin]]
 name = "howfastly-compute"
-path = "src/main.rs"
 test = false
 
 [dependencies]
@@ -16,3 +16,4 @@ fastly.workspace      = true
 howfastly.workspace   = true
 include_dir.workspace = true
 serde_json.workspace  = true
+sha2.workspace        = true

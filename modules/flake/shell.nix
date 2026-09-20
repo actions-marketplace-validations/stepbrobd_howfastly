@@ -15,7 +15,6 @@
         # rustc         # from crane
         # rustfmt       # from crane
 
-        cargo-hakari
         cargo-nextest
 
         # fastly
@@ -29,8 +28,10 @@
         wasm-bindgen-cli
       ];
 
+      # the compute embeds both at build time, the dist from the tree and the cells from nix
       shellHook = ''
         export WEB_DIST="$PWD/crates/howfastly-web/dist"
+        export CELLS="${pkgs.howfastly.cells}"
       '';
     };
   };

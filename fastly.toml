@@ -8,3 +8,18 @@ authors     = ["ysun@stepbrobd.com"]
 
 [scripts]
 build = "cargo build --package howfastly-compute --bin howfastly-compute --release --target wasm32-wasip1"
+
+[local_server.backends.plausible]
+url           = "https://stats.ysun.co/"
+override_host = "stats.ysun.co"
+
+[local_server.backends.fastly]
+url           = "https://api.fastly.com/"
+override_host = "api.fastly.com"
+
+[local_server.kv_stores]
+kvstore = []
+
+[[local_server.secret_stores.secretstore]]
+key  = "fastly-api-key"
+data = "unset"

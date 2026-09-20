@@ -1,14 +1,15 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use howfastly::http::parse_server_timing;
+use howfastly::http;
 use howfastly::stats;
-use howfastly::types::MetaResponse;
+use howfastly::types::{MetaResponse, Run, parse_meta};
 use js_sys::{Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    ProgressEvent, ReadableStreamDefaultReader, RequestInit, Response, Window, XmlHttpRequest,
+    AbortSignal, Headers, ProgressEvent, ReadableStreamDefaultReader, ReadableStreamReadResult,
+    RequestInit, Response, Window, XmlHttpRequest,
 };
 
 fn window() -> Window {
@@ -36,71 +37,184 @@ pub fn save_autostart() {
     }
 }
 
-async fn fetch(method: &str, url: &str, body: Option<Uint8Array>) -> Result<Response, JsValue> {
+async fn fetch(
+    method: &str,
+    url: &str,
+    json: Option<&str>,
+    signal: Option<&AbortSignal>,
+) -> Result<Response, JsValue> {
     let init = RequestInit::new();
     init.set_method(method);
-    if let Some(body) = body {
-        init.set_body(&JsValue::from(body));
+    init.set_signal(signal);
+    if let Some(json) = json {
+        let headers = Headers::new()?;
+        headers.set("content-type", "application/json")?;
+        init.set_headers_headers(&headers);
+        init.set_body_opt_str(Some(json));
     }
     let resp = JsFuture::from(window().fetch_with_str_and_init(url, &init)).await?;
     resp.dyn_into()
 }
 
+// status and body of an exchange whose answer the caller reads either way
+async fn exchange(method: &str, url: &str, json: Option<&str>) -> Result<(u16, String), JsValue> {
+    let resp = fetch(method, url, json, None).await?;
+    let status = resp.status();
+    let text = JsFuture::from(resp.text()?).await?;
+    Ok((status, text.as_string().unwrap_or_default()))
+}
+
+// run markers for the edge side counting, the outcome is ignored
+pub async fn start() {
+    let _ = fetch("POST", "/start", None, None).await;
+}
+
+// a beacon leaves even while the page unloads
+pub fn finish(run: &Run) {
+    if let Ok(json) = serde_json::to_string(run) {
+        let _ = window()
+            .navigator()
+            .send_beacon_with_opt_str("/finish", Some(&json));
+    }
+}
+
+pub async fn share(json: &str) -> Result<(u16, String), JsValue> {
+    exchange("POST", "/share", Some(json)).await
+}
+
+pub async fn report(id: &str) -> Result<(u16, String), JsValue> {
+    exchange("GET", &format!("/share/{id}.json"), None).await
+}
+
+// a text file of this origin, anything but a 200 is an error
+pub async fn text(url: &str) -> Result<String, JsValue> {
+    let (status, body) = exchange("GET", url, None).await?;
+    if status != 200 {
+        return Err(JsValue::from_str(&format!("{url} answered {status}")));
+    }
+    Ok(body)
+}
+
+// the message of a js error as a sentence, the debug form of anything else
+pub fn describe(e: JsValue) -> String {
+    let text = e
+        .dyn_ref::<js_sys::Error>()
+        .map(|e| String::from(e.message()))
+        .or_else(|| e.as_string())
+        .unwrap_or_else(|| format!("{e:?}"));
+    format!("{}.", text.trim_end_matches('.'))
+}
+
+pub fn unix_secs() -> u64 {
+    (js_sys::Date::now() / 1e3) as u64
+}
+
+// unix seconds as a date and time in the browser's zone, 2026-09-05 19:19:00
+pub fn local_time(secs: u64) -> String {
+    let date = js_sys::Date::new(&JsValue::from_f64(secs as f64 * 1e3));
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        date.get_full_year(),
+        date.get_month() + 1,
+        date.get_date(),
+        date.get_hours(),
+        date.get_minutes(),
+        date.get_seconds()
+    )
+}
+
+pub fn pathname() -> String {
+    window().location().pathname().unwrap_or_default()
+}
+
+// the live app replaces the page in the history, so back does not return to a dead link
+pub fn go_home() {
+    let _ = window().location().replace("/");
+}
+
+pub fn embedded(id: &str) -> Option<String> {
+    window().document()?.get_element_by_id(id)?.text_content()
+}
+
+// the write is issued before the future is awaited
+// navigator.clipboard is absent outside secure contexts and the typed getter would trap there
+pub fn copy(text: &str) -> JsFuture {
+    let clipboard = Reflect::get(&window().navigator(), &"clipboard".into())
+        .and_then(|value| value.dyn_into::<web_sys::Clipboard>());
+    JsFuture::from(match clipboard {
+        Ok(clipboard) => clipboard.write_text(text),
+        Err(error) => js_sys::Promise::reject(&error),
+    })
+}
+
 fn server_dur_ms(resp: &Response) -> f64 {
-    resp.headers()
-        .get("server-timing")
-        .ok()
-        .flatten()
-        .and_then(|h| parse_server_timing(&h))
-        .unwrap_or(0.0)
+    http::server_dur_ms(
+        resp.headers()
+            .get("server-timing")
+            .ok()
+            .flatten()
+            .as_deref(),
+    )
 }
 
 pub async fn ping() -> Result<f64, JsValue> {
     let start = now_ms();
-    let resp = fetch("GET", "/ping", None).await?;
+    let resp = fetch("GET", "/ping", None, None).await?;
     Ok((now_ms() - start - server_dur_ms(&resp)).max(0.0))
 }
 
 async fn drain(resp: &Response, on_progress: &mut impl FnMut(f64, u64)) -> Result<(), JsValue> {
-    let stream = resp.body().ok_or_else(|| JsValue::from_str("no body"))?;
+    let stream = resp
+        .body()
+        .ok_or_else(|| JsValue::from_str("The download had no body"))?;
     let reader: ReadableStreamDefaultReader = stream.get_reader().dyn_into()?;
     let mut total = 0u64;
     loop {
-        let chunk = JsFuture::from(reader.read()).await?;
-        if Reflect::get(&chunk, &"done".into())?.is_truthy() {
+        let chunk: ReadableStreamReadResult = JsFuture::from(reader.read()).await?.unchecked_into();
+        if chunk.get_done() == Some(true) {
             return Ok(());
         }
-        let value: Uint8Array = Reflect::get(&chunk, &"value".into())?.dyn_into()?;
+        let value: Uint8Array = chunk.get_value().dyn_into()?;
         total += u64::from(value.length());
         on_progress(now_ms(), total);
     }
 }
 
-pub async fn download(bytes: u64, mut on_progress: impl FnMut(f64, u64)) -> Result<f64, JsValue> {
+// the signal aborts the transfer, which then returns an error
+pub async fn download(
+    bytes: u64,
+    mut on_progress: impl FnMut(f64, u64),
+    signal: &AbortSignal,
+) -> Result<f64, JsValue> {
     let start = now_ms();
-    let resp = fetch("GET", &format!("/down?bytes={bytes}"), None).await?;
+    let resp = fetch("GET", &format!("/down?bytes={bytes}"), None, Some(signal)).await?;
     drain(&resp, &mut on_progress).await?;
     let secs = ((now_ms() - start - server_dur_ms(&resp)) / 1e3).max(1e-9);
     Ok(stats::mbps(bytes, secs))
 }
 
+// xhr upload progress can report a buffered body before it reaches the wire
+// report the body at request completion so its timestamp closes the measured span
 pub async fn upload(
     bytes: u64,
-    mut on_progress: impl FnMut(f64, u64) + 'static,
+    mut on_complete: impl FnMut(f64, u64),
+    signal: &AbortSignal,
 ) -> Result<f64, JsValue> {
     let xhr = XmlHttpRequest::new()?;
     xhr.open("POST", "/up")?;
+
+    let onabort = Closure::<dyn FnMut()>::new({
+        let xhr = xhr.clone();
+        move || {
+            let _ = xhr.abort();
+        }
+    });
+    signal.set_onabort(Some(onabort.as_ref().unchecked_ref()));
 
     let resolve = Rc::new(RefCell::new(None::<js_sys::Function>));
     let promise = js_sys::Promise::new(&mut |res, _| {
         *resolve.borrow_mut() = Some(res);
     });
-
-    let onprogress = Closure::<dyn FnMut(ProgressEvent)>::new(move |e: ProgressEvent| {
-        on_progress(now_ms(), e.loaded() as u64);
-    });
-    xhr.upload()?
-        .set_onprogress(Some(onprogress.as_ref().unchecked_ref()));
 
     let onloadend = Closure::<dyn FnMut(ProgressEvent)>::new({
         let resolve = resolve.clone();
@@ -112,30 +226,34 @@ pub async fn upload(
     });
     xhr.set_onloadend(Some(onloadend.as_ref().unchecked_ref()));
 
-    let body = Uint8Array::new_with_length(bytes as u32);
+    let len =
+        u32::try_from(bytes).map_err(|_| JsValue::from_str("The upload is larger than 4 GiB"))?;
+    let body = Uint8Array::new_with_length(len);
     let start = now_ms();
     xhr.send_with_opt_buffer_source(Some(&body))?;
     JsFuture::from(promise).await?;
+    let end = now_ms();
+    signal.set_onabort(None);
 
     let status = xhr.status().unwrap_or(0);
     if !(200..300).contains(&status) {
         return Err(JsValue::from_str(&format!(
-            "upload failed with status {status}"
+            "The upload failed with status {status}"
         )));
     }
-    let server_ms = xhr
-        .get_response_header("server-timing")
-        .ok()
-        .flatten()
-        .and_then(|h| parse_server_timing(&h))
-        .unwrap_or(0.0);
-    let secs = ((now_ms() - start - server_ms) / 1e3).max(1e-9);
+    let server_ms = http::server_dur_ms(
+        xhr.get_response_header("server-timing")
+            .ok()
+            .flatten()
+            .as_deref(),
+    );
+    let secs = ((end - start - server_ms) / 1e3).max(1e-9);
+    on_complete(end, bytes);
     Ok(stats::mbps(bytes, secs))
 }
 
 pub async fn meta() -> Result<MetaResponse, JsValue> {
-    let resp = fetch("GET", "/meta", None).await?;
+    let resp = fetch("GET", "/meta", None, None).await?;
     let text = JsFuture::from(resp.text()?).await?;
-    serde_json::from_str(&text.as_string().unwrap_or_default())
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    parse_meta(&text.as_string().unwrap_or_default()).map_err(|e| JsValue::from_str(&e.to_string()))
 }

@@ -3,8 +3,9 @@ mod run;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use clap::builder::RangedU64ValueParser;
 use clap::{Parser, ValueEnum};
-use howfastly::types::{self, SizePlan, TestConfig};
+use howfastly::types::{self, Direction, SizePlan, TestConfig};
 use reqwest::Version;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -40,6 +41,11 @@ impl PayloadSize {
     }
 }
 
+// a zero count would fail like a dead connection, the parser refuses it first
+fn positive() -> RangedU64ValueParser<usize> {
+    RangedU64ValueParser::from(1..)
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "howfastly",
@@ -50,6 +56,7 @@ impl PayloadSize {
     )
 )]
 pub struct Args {
+    /// Service to test against
     #[arg(
         long,
         short = 'U',
@@ -59,50 +66,89 @@ pub struct Args {
     pub url: String,
 
     // flat override for the per size iteration plan
-    #[arg(long, short)]
+    /// Transfers per size in place of the per size plan
+    #[arg(long, short, value_parser = positive())]
     pub nr_tests: Option<usize>,
 
-    #[arg(long, short = 'l', default_value_t = types::LATENCY_SAMPLES)]
+    /// Unloaded latency samples before the transfers
+    #[arg(long, short = 'l', default_value_t = types::LATENCY_SAMPLES, value_parser = positive())]
     pub nr_latency_tests: usize,
 
+    /// Largest transfer size, larger sizes leave the plan
     #[arg(long, short, value_enum, default_value = "100m")]
     pub max_payload_size: PayloadSize,
 
+    /// Measure the download direction only
     #[arg(long, short, conflicts_with = "upload_only")]
     pub download_only: bool,
 
+    /// Measure the upload direction only
     #[arg(long, short = 'u')]
     pub upload_only: bool,
 
     // bare flag binds the family's unspecified address
     // the kernel then picks the default outbound address at connect time
+    /// Connect over IPv4, from a given local address or any
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "0.0.0.0", conflicts_with = "ipv6")]
     pub ipv4: Option<Ipv4Addr>,
 
+    /// Connect over IPv6, from a given local address or any
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "::")]
     pub ipv6: Option<Ipv6Addr>,
 
     // force one protocol instead of probing h3 then negotiating
     // an unreachable forced version fails the run rather than falling back
+    /// Force HTTP/1.1, an unreachable version fails the run
     #[arg(long, group = "http_version")]
     pub http1: bool,
 
+    /// Force HTTP/2, an unreachable version fails the run
     #[arg(long, group = "http_version")]
     pub http2: bool,
 
+    /// Force HTTP/3, an unreachable version fails the run
     #[arg(long, group = "http_version")]
     pub http3: bool,
 
+    /// Output format for the results on stdout
     #[arg(long, short, value_enum, default_value = "human")]
     pub format: OutputFormat,
 
+    /// Print every transfer sample as it completes
     #[arg(long, short)]
     pub verbose: bool,
+
+    /// Publish the result summary and print the link on stderr
+    #[arg(long, short)]
+    pub share: bool,
 }
 
 impl Args {
     pub fn local_addr(&self) -> Option<IpAddr> {
         self.ipv4.map(IpAddr::V4).or(self.ipv6.map(IpAddr::V6))
+    }
+
+    // clap rejects both flags together
+    pub fn only(&self) -> Option<Direction> {
+        if self.download_only {
+            Some(Direction::Download)
+        } else if self.upload_only {
+            Some(Direction::Upload)
+        } else {
+            None
+        }
+    }
+
+    pub fn options(&self) -> run::Options {
+        run::Options {
+            base: self.url.trim_end_matches('/').to_string(),
+            local: self.local_addr(),
+            forced: self.http_version(),
+            only: self.only(),
+            verbose: self.verbose,
+            share: self.share,
+            cfg: self.config(),
+        }
     }
 
     // clap rejects more than one flag in the group
@@ -139,10 +185,10 @@ impl Args {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let results = run::run(&args).await?;
+    let results = run::run(&args.options()).await?;
     print!("{}", output::render(&results, args.format)?);
     Ok(())
 }
@@ -174,19 +220,38 @@ mod tests {
             "-d",
             "-f",
             "json",
+            "-s",
         ])
         .unwrap();
         assert_eq!(a.url, "http://x");
+        assert!(a.share);
         assert_eq!(a.nr_tests, Some(3));
         assert_eq!(a.nr_latency_tests, 5);
         assert!(matches!(a.max_payload_size, PayloadSize::M1));
-        assert!(a.download_only);
+        assert_eq!(a.only(), Some(Direction::Download));
         assert!(matches!(a.format, OutputFormat::Json));
 
         let a = Args::try_parse_from(["howfastly", "-u"]).unwrap();
-        assert!(a.upload_only);
+        assert_eq!(a.only(), Some(Direction::Upload));
+        assert_eq!(Args::try_parse_from(["howfastly"]).unwrap().only(), None);
         assert!(Args::try_parse_from(["howfastly", "-d", "-u"]).is_err());
         assert!(Args::try_parse_from(["howfastly", "-f", "json-pretty"]).is_err());
+    }
+
+    #[test]
+    fn counts_start_at_one() {
+        assert!(Args::try_parse_from(["howfastly", "-n", "0"]).is_err());
+        assert!(Args::try_parse_from(["howfastly", "-l", "0"]).is_err());
+        let a = Args::try_parse_from(["howfastly", "-n", "1", "-l", "1"]).unwrap();
+        assert_eq!((a.nr_tests, a.nr_latency_tests), (Some(1), 1));
+    }
+
+    // the flag values name sizes the download plan really has
+    #[test]
+    fn payload_sizes_follow_the_plan() {
+        for size in PayloadSize::value_variants() {
+            assert!(types::DOWNLOAD_PLAN.iter().any(|p| p.bytes == size.bytes()));
+        }
     }
 
     #[test]

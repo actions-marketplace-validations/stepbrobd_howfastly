@@ -15,7 +15,7 @@
 
         nixpkgs.instances.pkgs = inputs.nixpkgs;
         nixpkgs.overlays = with inputs; [
-          rust-overlay.overlays.default
+          fenix.overlays.default
           self.overlays.default
         ];
       };
@@ -23,7 +23,7 @@
     { systems = import inputs.systems; };
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable-small";
     parts.url = "github:hercules-ci/flake-parts";
     parts.inputs.nixpkgs-lib.follows = "nixpkgs";
     systems.url = "github:nix-systems/triplet";
@@ -34,8 +34,8 @@
     autopilot.inputs.systems.follows = "systems";
     # c
     crane.url = "github:ipetkov/crane";
-    # r
-    rust-overlay.url = "github:oxalica/rust-overlay";
-    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    # f
+    fenix.url = "github:nix-community/fenix";
+    fenix.inputs.nixpkgs.follows = "nixpkgs";
   };
 }

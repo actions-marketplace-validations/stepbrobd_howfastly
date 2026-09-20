@@ -2,23 +2,28 @@
 name    = "howfastly-web"
 publish = false
 
-edition.workspace = true
-version.workspace = true
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
 
 # the bin only builds for wasm32-unknown-unknown, keep it out of host
 # test builds
 [[bin]]
 name = "howfastly-web"
-path = "src/main.rs"
 test = false
 
 [dependencies]
 console_error_panic_hook.workspace = true
+futures.workspace                  = true
 gloo-timers.workspace              = true
 howfastly.workspace                = true
+howfastly-map.workspace            = true
 js-sys.workspace                   = true
 leptos.workspace                   = true
 serde_json.workspace               = true
 wasm-bindgen.workspace             = true
 wasm-bindgen-futures.workspace     = true
-web-sys.workspace                  = true
+
+[dependencies.web-sys]
+features  = ["AbortController", "AbortSignal", "Clipboard", "Document", "Element", "Headers", "Location", "Navigator", "Node", "Performance", "ProgressEvent", "ReadableStream", "ReadableStreamDefaultReader", "ReadableStreamReadResult", "RequestInit", "Response", "Storage", "Window", "XmlHttpRequest", "XmlHttpRequestEventTarget", "console"]
+workspace = true

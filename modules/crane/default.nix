@@ -5,10 +5,11 @@ let inherit (inputs.nixpkgs) lib; in
 pkgs: # pass from call site
 
 lib.fix (crane: {
-  toolchain = pkgs.rust-bin.stable.latest.minimal.override {
-    extensions = [ "clippy" "rust-analyzer" "rust-src" "rustfmt" ];
-    targets = [ "wasm32-unknown-unknown" "wasm32-wasip1" ];
-  };
+  toolchain = with pkgs.fenix; combine [
+    (stable.withComponents [ "cargo" "clippy" "rust-analyzer" "rust-src" "rustc" "rustfmt" ])
+    targets.wasm32-unknown-unknown.stable.rust-std
+    targets.wasm32-wasip1.stable.rust-std
+  ];
 
   lib = (inputs.crane.mkLib pkgs).overrideToolchain crane.toolchain;
 
@@ -19,29 +20,30 @@ lib.fix (crane: {
     strictDeps = true;
     __structuredAttrs = true;
 
-    # crane cant infer pname/version
-    # set a placeholder and override in per crate drv
+    # crane cannot read a workspace version, versionOf resolves it below
     pname = "howfastly";
-    version = "2001.717.0";
+    version = crane.versionOf "howfastly";
   };
 
-  # pre-build/cache deps
+  # dependencies built once and shared by every crate derivation
   cargoArtifacts = crane.lib.buildDepsOnly crane.commonArgs;
 
   individualCrateArgs = crane.commonArgs // {
     inherit (crane) cargoArtifacts;
-    # test with cargo-nextest
+    # tests run in the nextest check, never inside a package build
     doCheck = false;
   };
 
   fileSetForCrates = crates: lib.fileset.toSource {
     root = ../..;
 
+    # assets hold what the sources embed with include_str
     fileset = lib.fileset.unions ([
       ../../.cargo/config.toml
       ../../Cargo.toml
       ../../Cargo.lock
-    ] ++ lib.map crane.lib.fileset.commonCargoSources crates);
+    ] ++ lib.map crane.lib.fileset.commonCargoSources crates
+    ++ lib.map (crate: lib.fileset.maybeMissing (crate + "/assets")) crates);
   };
 
   # crateNameFromCargoToml parses a manifest literally, so a crate inheriting
