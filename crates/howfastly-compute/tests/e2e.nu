@@ -155,6 +155,8 @@ def checks [url: string, log: string] {
   assert (($robots.body | into string) | str contains "Disallow: /down\n")
   assert (($robots.body | into string) | str contains "Sitemap: https://speed.edgecompute.app/sitemap.xml\n")
   assert (not (($robots.body | into string) | str contains "/share"))
+  # a render that cannot read meta shows an error, which google counts as a soft 404
+  assert (not (($robots.body | into string) | str contains "/meta"))
   # raw keeps nu from parsing the xml into a record
   let sitemap = http get --full --allow-errors --raw $"($url)/sitemap.xml"
   assert equal $sitemap.status 200
